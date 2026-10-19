@@ -1,0 +1,28 @@
+# RF-DETR Training Configuration
+model:
+  name: "RF-DETR"
+  variant: "RFDETRMedium"
+  pretrained: true
+
+data:
+  dataset_dir: "/vol/datasets/completed-project-5/coco"
+
+training:
+  epochs: 80
+  patience: 10
+  imgsz: 640
+  batch_size: 4
+  grad_accum_steps: 4
+  workers: 4
+  lr: 0.0001
+  weight_decay: 0.0001
+  lr_encoder: 0.00015
+  device: "cuda"
+  seed: 42
+  eval_interval: 1
+  checkpoint_interval: 10
+  tensorboard: true
+
+outputs:
+  checkpoint_dir: "/vol/checkpoints/rfdetr_baseline"
+  log_dir: "/vol/logs/rfdetr_baseline"

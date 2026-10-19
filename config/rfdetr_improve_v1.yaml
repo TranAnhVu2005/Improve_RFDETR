@@ -1,0 +1,36 @@
+# RF-DETR Training Configuration
+model:
+  name: "RF-DETR"
+  variant: "RFDETRMedium"
+  pretrained: true
+
+training:
+  epochs: 80
+  patience: 10
+  imgsz: 640
+  batch_size: 16
+  grad_accum_steps: 1
+  workers: 4
+  lr: 0.0001
+  weight_decay: 0.0001
+  device: 0
+  seed: 42
+  eval_interval: 1
+  checkpoint_interval: 10
+  lr_encoder: 0.00015
+
+evaluation:
+  eval_conf: 0.01 # Confidence threshold for COCO mAP evaluation
+  cm_conf: 0.25 # Confidence threshold for Confusion Matrix
+  iou_step: 0.05 # IoU step for mAP@50-95 (0.50:0.05:0.95)
+  benchmark_warmup: 20 # Warmup iterations for latency/FPS measurement
+
+loss_weights:
+  loss_ce: 1.0 # RF-DETR 1.11.2 classification loss key
+  loss_bbox: 5.0 # L1 box regression loss
+  loss_giou: 2.0 # GIoU loss
+
+outputs:
+  checkpoint_dir: "/vol/checkpoints/rfdetr_improve_v1"
+  log_dir: "/vol/logs/rfdetr_improve_v1"
+  eval_dir: "/vol/outputs/rfdetr_eval_improve_v1"
