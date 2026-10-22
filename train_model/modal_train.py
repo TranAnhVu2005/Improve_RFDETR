@@ -189,8 +189,11 @@ def main(
             config_path=config_path or "/workspace/config/rfdetr_baseline.yaml",
         )
     elif mode == "improve":
-        checkpoint = train_improved.remote(
+        # Submit the long-running training input asynchronously so it remains
+        # durable if the local CLI disconnects. .get() still streams/waits for
+        # the result while the client remains connected.
+        checkpoint = train_improved.spawn(
             dataset_dir=dataset_dir,
             config_path=config_path or "/workspace/config/rfdetr_improve_v1.yaml",
-        )
+        ).get()
     print(f"Training finished. Best checkpoint: {checkpoint}")
