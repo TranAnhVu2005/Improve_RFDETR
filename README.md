@@ -1,89 +1,56 @@
-# RF-DETR training on Modal
+# RF-DETR cho nhận diện nguyên liệu nấu ăn
 
-## 1. Install local tools and configure the Roboflow secret
+## Mục tiêu
 
-Install the Modal CLI/SDK if it is not already installed:
+So sánh baseline RF-DETR với nhánh cải tiến có thể bật/tắt từng kỹ thuật bằng config. Detector nhận diện nguyên liệu trong ảnh; kết quả detection là đầu vào cho bước ánh xạ nguyên liệu sang công thức và món ăn đề xuất. Tài liệu này hướng dẫn huấn luyện/checkpoint, không thay thế pipeline gợi ý món ăn.
+
+## Protocol cố định cho mọi run
+
+- Cùng dataset snapshot và cùng train/val/test split. Ghi số ảnh, tỉ lệ thực tế và cách chia/seed; tỷ lệ hiện chưa được ghi nhận, không tự suy đoán.
+- Ảnh 640×640; A100; patience 10; tối đa 80 epochs.
+- 32 lớp theo mapping gốc; index báo cáo 1 là `beef`, index 32 là `tomato`. Không tự điền lớp còn thiếu; xác minh annotation category IDs và thứ tự trước train.
+- Dùng cùng baseline protocol, seed, checkpoint selection và training parameters cho các run; chỉ toggle kỹ thuật được phép khác.
+- Bàn giao best checkpoint. Nhóm chạy script đánh giá riêng sau đó: confidence 0.01, mAP@0.5:0.95 với bước IoU 0.05, confusion matrix. Không báo metric nếu chưa có output script.
+
+Các ràng buộc chi tiết và xử lý khi thiếu thông tin: [AI_AGENT_CONTEXT.md](AI_AGENT_CONTEXT.md). Quy trình agent: [AI_AGENT_TASK_INSTRUCTIONS.md](AI_AGENT_TASK_INSTRUCTIONS.md).
+
+## Cấu hình và ablation
+
+`config/rfdetr_baseline.yaml` là baseline; `config/rfdetr_improve_v1.yaml` là cấu hình improved. Nhánh improved cần có cờ boolean riêng mặc định `true` cho:
+
+- `qar`
+- `dqcd`
+- `iqcm`
+- `hifrm`
+- `scu`
+- `lue`
+- `weighted_tversky`
+- `hard_negative_mining`
+- `rfo.enabled` (tìm kiếm siêu tham số)
+
+Mỗi ablation tắt đúng cờ cần kiểm tra, giữ các cờ khác và protocol cố định. Hyperparameters/weights/bounds phải khai báo ở config; không dựa vào hidden Python defaults. Kiểm tra code thực tế trước khi coi các cờ đã được tích hợp.
+
+## Tài liệu tham khảo
+
+`BaiBaoDangMarkDown/README_PAPERS.md` là bản đồ ngắn tới năm bài nghiên cứu và giới hạn chuyển giao. Các file paper gốc trong thư mục đó được giữ nguyên để tra section/equation. Tên kỹ thuật không phải bằng chứng implementation trùng paper; ghi rõ `Exact`, `Adaptation`, hoặc `Unverified`.
+
+## Chạy Modal
+
+Entrypoint được thấy trong repo:
 
 ```powershell
-py -m pip install modal
-modal setup
-```
-
-In the Modal dashboard, create a Secret named `roboflow-api-key` containing the
-environment variable `ROBOFLOW_API_KEY` with your Roboflow API key. Do not put
-the key in source files. If a key was previously shared, revoke it and create a
-replacement.
-
-## 2. Start training (dataset setup is automatic)
-
-From the project root, run:
-
-```powershell
+modal run .\train_model\modal_train.py --mode baseline
 modal run .\train_model\modal_train.py --mode improve
 ```
 
-Before training, the code checks `/vol/datasets/completed-project-5/coco` on
-the `rfdetr-storage` Modal Volume. If train/valid COCO annotations are missing,
-it downloads `nckhcict2025/completed-project` version 5 from Roboflow, saves it
-to that Volume, and commits it. Later runs reuse the saved dataset. No local
-download or manual `modal volume put` is needed.
+Modal hiện khai báo A100 cho cả hai mode. Kiểm tra config/path thực tế trước khi chạy. Các lệnh trên khởi chạy job GPU có thể tính phí. Không chạy job dài trong công việc audit/tài liệu.
 
-To use a different volume, set `RFDETR_VOLUME_NAME` before running the command.
-The Modal function uses an A10G GPU, accumulates four batches of four samples
-(effective batch size 16), and persists checkpoints/logs to the volume.
-Training may incur Modal GPU and storage charges; the command above starts a
-real training job.
+Config mặc định (nếu đúng với revision đang dùng): `config/rfdetr_baseline.yaml`, `config/rfdetr_improve_v1.yaml`. Có thể truyền `--dataset-dir` và `--config-path`; kiểm tra `modal_train.py` để biết cú pháp hiện hành.
 
-To copy the best checkpoint back to the machine after the run:
+## Checkpoint và đánh giá
 
-```powershell
-modal volume get rfdetr-storage checkpoints/rfdetr_baseline/best.pth .\best.pth
-```
+Trước khi bàn giao, ghi đường dẫn best checkpoint, run/config snapshot, split ID, best epoch và tiêu chí chọn checkpoint. Không gộp/ghi đè output baseline, improved và từng ablation. Đánh giá mAP/CM thuộc script riêng của nhóm; tham số phải giữ confidence 0.01, IoU step 0.05 và confusion matrix.
 
-The baseline uses RF-DETR's supported training arguments. The previous
-`use_balanced_loss` and custom loss-weight YAML entries were removed because the
-stock RF-DETR training API does not accept those fields.
+## Trạng thái và giới hạn
 
-## 3. Train the improved model
-
-The baseline remains the default. Select the improved implementation explicitly:
-
-```powershell
-modal run .\train_model\modal_train.py --mode improve
-```
-
-To override its dataset or configuration:
-
-```powershell
-modal run .\train_model\modal_train.py --mode improve `
-  --dataset-dir /vol/datasets/completed-project-5/coco `
-  --config-path /workspace/config/rfdetr_improve_v1.yaml
-```
-
-The improved route pins `rfdetr==1.11.2` because its criterion/model integration
-uses checked internal APIs. It runs a small RFO-style validation search (six
-candidate runs of three epochs by default), then trains the selected
-configuration for the configured full epoch count. It selects candidates using
-validation mAP@0.5:0.95 and moves the next population toward the best observed
-candidate. This is a bounded practical search, not a reproduction of the paper's
-20-fox/100-iteration experiment. Search adds GPU time; the `rfo` section can be
-added to `config/rfdetr_improve_v1.yaml` to change `population`,
-`generations`, and `epochs_per_trial`, or set `enabled: false` to skip it.
-Results are written to `rfo_results.csv` and `rfo_best.json` in the configured
-log directory.
-
-The training script integrates QAR, IQCM, HIFRM, SCU/LUE, DQCD, Tversky, and
-query-level hard-negative mining into RF-DETR's actual model/criterion and
-optimizer. Two scope adaptations are intentional: the Spectral-DETR paper's
-learned DAFD gate is not part of the requested module set, so DQCD temperature
-uses a high-frequency-energy proxy; and query-level hard-negative mining is an
-adaptation, not the patch-level mining method in the cited arXiv paper. The
-improved route caps the physical batch at four samples on its A10G and uses
-gradient accumulation to preserve the selected effective batch size. The
-baseline route and its trainer are unchanged.
-
-For the current improvement config, download the checkpoint with:
-
-```powershell
-modal volume get rfdetr-storage checkpoints/rfdetr_improve_v1/best.pth .\best_improved.pth
-```
+Đường dẫn, class mapping đầy đủ và split ratio cần được xác nhận từ dataset thực tế. Chỉ cập nhật kết quả benchmark sau khi có log/artifact có thể truy vết. Xem `git status` trước khi chỉnh sửa; giữ nguyên thay đổi người dùng đang có.

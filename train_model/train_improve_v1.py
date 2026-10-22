@@ -11,6 +11,8 @@ import math
 import random
 import shutil
 import signal
+import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -865,6 +867,7 @@ def _training_kwargs(
     candidate: dict[str, float | int],
     *,
     epochs: int,
+    resume_checkpoint: Path | None = None,
 ) -> dict[str, Any]:
     configured_device = training.get("device", "cuda")
     device = "cuda" if configured_device == 0 else configured_device
@@ -878,7 +881,7 @@ def _training_kwargs(
         int(training.get("grad_accum_steps", 1)),
         math.ceil(effective_batch_size / physical_batch_size),
     )
-    return {
+    kwargs: dict[str, Any] = {
         "dataset_dir": dataset_dir,
         "epochs": epochs,
         "early_stopping": True,
@@ -894,9 +897,14 @@ def _training_kwargs(
         "device": device,
         "seed": int(training.get("seed", 42)),
         "eval_interval": 1,
-        "checkpoint_interval": int(training.get("checkpoint_interval", 1)),
+        # Save a full resumable checkpoint after every epoch.
+        "checkpoint_interval": 1,
         "tensorboard": True,
     }
+    if resume_checkpoint is not None and resume_checkpoint.is_file():
+        kwargs["resume"] = str(resume_checkpoint)
+        print(f"[RESUME] Continuing from full checkpoint: {resume_checkpoint}")
+    return kwargs
 
 
 def _sync_checkpoint(output_dir: Path) -> None:
@@ -1036,6 +1044,47 @@ def train_rfdetr(
     def handle_sigterm(signum: int, _: Any) -> None:
         raise SystemExit(128 + signum)
 
+    # Modal Volumes persist only after commit(). RF-DETR writes checkpoint.pth
+    # during training; commit it once the file size/mtime has stopped changing.
+    commit_stop = threading.Event()
+
+    def checkpoint_commit_worker() -> None:
+        checkpoint_file = checkpoint_dir / "checkpoint.pth"
+        last_committed: tuple[int, int] | None = None
+        previous: tuple[int, int] | None = None
+        stable_observations = 0
+        while not commit_stop.wait(20):
+            try:
+                stat = checkpoint_file.stat()
+                signature = (stat.st_size, stat.st_mtime_ns)
+            except OSError:
+                previous = None
+                stable_observations = 0
+                continue
+            if signature == previous:
+                stable_observations += 1
+            else:
+                previous = signature
+                stable_observations = 0
+            if (stable_observations >= 1 and signature != last_committed
+                    and signature[0] > 0 and commit_fn is not None):
+                try:
+                    commit_fn()
+                    last_committed = signature
+                    print(
+                        f"[CHECKPOINT] Modal Volume committed: {checkpoint_file} ({signature[0]} bytes)")
+                except Exception as exc:
+                    # Keep training alive; the next stable checkpoint will retry.
+                    print(f"[WARNING] Periodic volume commit failed: {exc!r}")
+
+    commit_thread = threading.Thread(
+        target=checkpoint_commit_worker,
+        name="rfdetr-checkpoint-committer",
+        daemon=True,
+    )
+    if commit_fn is not None:
+        commit_thread.start()
+
     signal.signal(signal.SIGTERM, handle_sigterm)
     try:
         rfo = dict(config.get("rfo", {}))
@@ -1143,6 +1192,15 @@ def train_rfdetr(
             f"[*] Final improved training: {variant}, queries={best_candidate['num_queries']}, "
             f"batch={best_candidate['batch_size']}, lr={best_candidate['lr']:.3g}."
         )
+        resume_enabled = bool(training.get("resume", True))
+        resume_checkpoint = checkpoint_dir / "checkpoint.pth"
+        if not resume_enabled:
+            resume_checkpoint = None
+        elif not resume_checkpoint.is_file():
+            print(
+                "[RESUME] No existing full checkpoint found; starting a new final training run.")
+            resume_checkpoint = None
+
         final_model.train(
             **_training_kwargs(
                 dataset_dir,
@@ -1150,9 +1208,13 @@ def train_rfdetr(
                 checkpoint_dir,
                 best_candidate,
                 epochs=int(training.get("epochs", 80)),
+                resume_checkpoint=resume_checkpoint,
             )
         )
     finally:
+        commit_stop.set()
+        if commit_thread.is_alive():
+            commit_thread.join(timeout=25)
         signal.signal(signal.SIGTERM, original_sigterm)
         sync_final_outputs()
 

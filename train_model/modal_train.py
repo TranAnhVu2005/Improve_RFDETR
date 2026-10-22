@@ -11,7 +11,8 @@ import modal
 
 APP_NAME = "rfdetr-baseline"
 VOLUME_NAME = os.environ.get("RFDETR_VOLUME_NAME", "rfdetr-storage")
-ROBOFLOW_SECRET_NAME = os.environ.get("ROBOFLOW_SECRET_NAME", "roboflow-api-key")
+ROBOFLOW_SECRET_NAME = os.environ.get(
+    "ROBOFLOW_SECRET_NAME", "roboflow-api-key")
 REMOTE_ROOT = "/workspace"
 VOLUME_ROOT = "/vol"
 DEFAULT_DATASET_DIR = f"{VOLUME_ROOT}/datasets/completed-project-5/coco"
@@ -111,7 +112,8 @@ def ensure_roboflow_dataset(dataset_dir: str = DEFAULT_DATASET_DIR) -> str:
             .version(ROBOFLOW_VERSION)
             .download("coco", location=str(download_location))
         )
-        download_root = Path(getattr(downloaded, "location", download_location))
+        download_root = Path(
+            getattr(downloaded, "location", download_location))
         source = _find_coco_dataset(download_root)
         if source is None:
             raise FileNotFoundError(
@@ -135,7 +137,7 @@ def ensure_roboflow_dataset(dataset_dir: str = DEFAULT_DATASET_DIR) -> str:
 
 @app.function(
     image=image,
-    gpu="A10G",
+    gpu="A100",
     timeout=24 * 60 * 60,
     volumes={VOLUME_ROOT: volume},
 )
@@ -154,7 +156,7 @@ def train_baseline(
 
 @app.function(
     image=improved_image,
-    gpu="A10G",
+    gpu="A100",
     timeout=24 * 60 * 60,
     volumes={VOLUME_ROOT: volume},
 )
