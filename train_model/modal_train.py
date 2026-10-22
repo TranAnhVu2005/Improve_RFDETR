@@ -189,11 +189,17 @@ def main(
             config_path=config_path or "/workspace/config/rfdetr_baseline.yaml",
         )
     elif mode == "improve":
-        # Submit the long-running training input asynchronously so it remains
-        # durable if the local CLI disconnects. .get() still streams/waits for
-        # the result while the client remains connected.
-        checkpoint = train_improved.spawn(
+        # Submit as a durable background input. Do not wait on .get() here:
+        # the user should be able to close the local terminal without tying the
+        # training input's lifetime to this local entrypoint.
+        function_call = train_improved.spawn(
             dataset_dir=dataset_dir,
             config_path=config_path or "/workspace/config/rfdetr_improve_v1.yaml",
-        ).get()
+        )
+        print(
+            "Improved training submitted as a background Modal FunctionCall. "
+            f"FunctionCall ID: {function_call.object_id}. "
+            "Monitor it in the Modal Dashboard."
+        )
+        return
     print(f"Training finished. Best checkpoint: {checkpoint}")
