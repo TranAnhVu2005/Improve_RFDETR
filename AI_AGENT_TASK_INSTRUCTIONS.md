@@ -48,7 +48,7 @@ Trước patch, lập bảng cho QAR, DQCD, IQCM, HIFRM, SCU, LUE, Weighted Tver
 ### C. Config/ablation
 
 - Mỗi toggle độc lập: `qar`, `dqcd`, `iqcm`, `hifrm`, `scu`, `lue`, `weighted_tversky`, `hard_negative_mining`; `rfo.enabled` điều khiển tìm kiếm.
-- Bật tất cả trong cấu hình improved mặc định; một lần ablation chỉ đổi cờ cần thử và giữ phần còn lại/protocol giống nhau.
+- Chỉ bật mặc định các kỹ thuật có đường triển khai được đối chiếu trong code. Trong revision hiện tại, `qar`, `dqcd`, `iqcm`, `hifrm`, `scu`, `lue` bật; `weighted_tversky`, `hard_negative_mining`, `rfo.enabled` tắt và fail fast nếu bật vì thiếu phương trình/dữ liệu/thuật toán đã xác minh.
 - Validate dependencies rõ ràng (ví dụ SCU/LUE); cấm tự tắt module khác khi phụ thuộc.
 - RFO chỉ search LR, num_queries, weight_decay, batch_size theo yêu cầu. Ghi candidate, bounds, seed, fitness, epochs/trial, compute budget và config áp dụng thật. Candidate dùng validation; tuyệt đối không dùng test. RFO không chạy dài/tốn phí nếu chưa được cho phép.
 - Ghi run ID, toggle vector, config snapshot/hash, dataset/split ID, seed, version, checkpoint path, best epoch và validation criterion.
@@ -58,7 +58,7 @@ Trước patch, lập bảng cho QAR, DQCD, IQCM, HIFRM, SCU, LUE, Weighted Tver
 
 Chỉ chạy các kiểm tra phù hợp nhiệm vụ; không tự khởi động training trả phí. Báo rõ `PASS`, `PARTIAL`, `BLOCKED` hoặc `FAIL` và không đánh dấu các kiểm tra chưa chạy là đạt.
 
-- [ ] Config toggles có hiệu lực, tất cả mặc định true; RFO toggle riêng.
+- [ ] Config toggles có hiệu lực; kỹ thuật đã triển khai bật, phần chưa đủ căn cứ tắt và fail fast.
 - [ ] Dataset split/ratio được ghi nhận thực tế và đồng nhất; class mapping 32 lớp khớp nguồn.
 - [ ] Protocol cố định ở mọi route: 640, A100, patience 10, cap 80.
 - [ ] Paper/code matrix có trích section/equation, phân loại exact/adaptation/unverified.

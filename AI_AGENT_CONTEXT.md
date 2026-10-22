@@ -17,15 +17,17 @@ Nghiên cứu cải tiến RF-DETR cho phát hiện nguyên liệu nấu ăn; đ
 - Best checkpoint là artifact bàn giao cho script đánh giá. Không tuyên bố metric/kết quả nếu chưa chạy script trên checkpoint.
 - Dataset split, thứ tự class, kích thước ảnh, patience, GPU và epoch tối đa không phải ablation knobs.
 
-## Kỹ thuật cần có toggle
+## Trạng thái implementation hiện tại
 
-Tất cả bật mặc định trong config improved; mỗi nhóm là cờ độc lập, có thể tắt riêng:
+Trong `config/rfdetr_improve_v1.yaml`, các toggle chạy được mặc định bật: `qar`, `dqcd`, `iqcm`, `hifrm`, `scu`, `lue`. SCU và LUE có cờ độc lập. DQCD dùng nhánh fixed-temperature `m=1` trong paper khi DAFD vắng mặt; DAFD chưa được tích hợp. IQCM `top-M=100`, IQCM loss weight `0.25`, và HIFRM `gamma=2` là lựa chọn cấu hình của đề tài do paper không ấn định số tương ứng.
 
-`qar`, `dqcd`, `iqcm`, `hifrm`, `scu`, `lue`, `weighted_tversky`, `hard_negative_mining`, `rfo`.
+Các cờ `weighted_tversky`, `hard_negative_mining`, `rfo.enabled` mặc định tắt. Bật lên sẽ fail fast: chưa có phương trình Weighted Tversky phù hợp query classification; HNM trong MIDOG đòi hỏi dữ liệu crop mô học; thuật toán/fitness RFO chưa được xác minh đủ. Không bật các mục này để chạy ablation giả.
 
-IQCM và HIFRM là hai toggle riêng. SCU và LUE là hai toggle riêng để có thể ablate; nếu một phần phụ thuộc phần kia, validate config và báo lỗi/định nghĩa hành vi rõ ràng, không âm thầm bỏ qua. RFO chỉ điều khiển tìm kiếm siêu tham số (learning rate, số queries, weight decay, batch size) và có thể tắt độc lập; không được thay đổi các ràng buộc cố định phía trên. Mọi knob/weight/giới hạn thuật toán phải nằm trong config, không giấu ở Python defaults.
+Mọi ablation đổi đúng cờ cần nghiên cứu; giữ nguyên protocol, data split và các hyperparameter còn lại. Không tuyên bố cải thiện độ chính xác nếu chưa chạy cùng split và script đánh giá của nhóm. Class mapping và dataset phải qua kiểm tra trước khi train.
 
-Ví dụ schema dự kiến (đối chiếu với implementation trước khi sửa code):
+Improved config bật `resume: true`. Full Lightning checkpoint `last.ckpt` được lưu mỗi epoch và commit ổn định lên Modal Volume; khi chạy lại, ưu tiên `last.ckpt`, fallback checkpoint lưu theo epoch. Resume khôi phục optimizer/scheduler nếu checkpoint đầy đủ còn tồn tại. Có thể mất epoch đang chạy khi bị kill; thí nghiệm mới cần output directory riêng hoặc `resume: false`.
+
+Schema đang dùng:
 
 ```yaml
 improvements:
@@ -35,11 +37,10 @@ improvements:
   hifrm: true
   scu: true
   lue: true
-  weighted_tversky: true
-  hard_negative_mining: true
+  weighted_tversky: false
+  hard_negative_mining: false
 rfo:
-  enabled: true
-  search: [lr, num_queries, weight_decay, batch_size]
+  enabled: false
 ```
 
 ## Repo hiện được thấy

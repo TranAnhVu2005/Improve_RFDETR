@@ -35,13 +35,21 @@ DEFAULT_CONFIG_PATH = (
 
 @dataclass(frozen=True)
 class ImprovementConfig:
+    qar: bool = True
+    dqcd: bool = True
+    iqcm: bool = True
+    hifrm: bool = False
+    scu: bool = True
+    lue: bool = True
+    weighted_tversky: bool = False
+    hard_negative_mining: bool = False
+    qar_scale_min: float = 0.5
+    qar_scale_max: float = 2.0
+    qar_scale_init: float = 1.0
     dqcd_weight: float = 0.08
     iqcm_weight: float = 0.25
     scu_weight: float = 0.1
     lue_weight: float = 0.25
-    tversky_weight: float = 0.2
-    tversky_alpha: float = 0.7
-    tversky_beta: float = 0.3
     hifrm_gamma: float = 2.0
     hard_negative_k: int = 128
     iqcm_top_m: int = 100
@@ -51,43 +59,36 @@ class ImprovementConfig:
 
 
 class ImprovementHeads(nn.Module):
-    def __init__(self, hidden_dim: int) -> None:
+    def __init__(self, hidden_dim: int, *, iqcm: bool, uncertainty: bool) -> None:
         super().__init__()
-        self.quality_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
+        self.quality_head = nn.Linear(hidden_dim, 1) if iqcm else None
+        self.uncertainty_head = (
+            nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, 4),
+            )
+            if uncertainty
+            else None
         )
-        self.uncertainty_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 4),
-        )
-        nn.init.zeros_(self.uncertainty_head[-1].weight)
-        nn.init.constant_(self.uncertainty_head[-1].bias, -5.0)
+        if self.uncertainty_head is not None:
+            nn.init.zeros_(self.uncertainty_head[-1].weight)
+            nn.init.constant_(self.uncertainty_head[-1].bias, -5.0)
 
 
 def _frequency_gate(samples: Any) -> torch.Tensor:
-    """Use high-frequency energy as a proxy; this scope does not add a DAFD module."""
+    """Return DQCD's fixed-temperature fallback when the paper's DAFD is absent.
+
+    Spectral-DETR explicitly sets the temperature multiplier to one when DAFD is
+    disabled. Image FFT energy is not a substitute for the learned DAFD gates, so
+    do not infer a degradation score from the input image here.
+    """
     images = getattr(samples, "tensors", samples)
     if not isinstance(images, torch.Tensor) or images.ndim != 4:
         raise RuntimeError(
             "RF-DETR compatibility error: expected a [batch, channels, height, width] tensor."
         )
-
-    small = F.interpolate(
-        images.float(), size=(64, 64), mode="bilinear", align_corners=False
-    )
-    spectrum = torch.fft.rfft2(small, norm="ortho").abs().mean(dim=1)
-    height, width = small.shape[-2:]
-    fy = torch.fft.fftfreq(height, device=small.device).abs()[:, None]
-    fx = torch.fft.rfftfreq(width, device=small.device)[None, :]
-    radius = torch.sqrt(fx.square() + fy.square())
-    low = spectrum[:, radius < 0.10].mean(dim=1)
-    middle = spectrum[:, (radius >= 0.10) & (radius < 0.25)].mean(dim=1)
-    high = spectrum[:, radius >= 0.25].mean(dim=1)
-    energy = torch.stack((low, middle, high), dim=1)
-    return (energy[:, 2] / energy.sum(dim=1).clamp_min(1e-8)).clamp(0.0, 1.0)
+    return torch.ones(images.shape[0], dtype=torch.float32, device=images.device)
 
 
 def _box_iou_and_giou(boxes1: torch.Tensor, boxes2: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -128,42 +129,11 @@ def _match_indices(
     return indices
 
 
-def _hardness(probabilities: torch.Tensor) -> torch.Tensor:
-    objectness = probabilities.max(dim=-1).values
-    if probabilities.shape[-1] <= 1:
-        return objectness
-    return objectness + 0.25 * _ambiguity(probabilities)
-
-
 def _ambiguity(probabilities: torch.Tensor) -> torch.Tensor:
     if probabilities.shape[-1] <= 1:
         return torch.zeros_like(probabilities[..., 0])
-    entropy = -(
-        probabilities.clamp(1e-7, 1 - 1e-7)
-        * probabilities.clamp(1e-7, 1 - 1e-7).log()
-        + (1 - probabilities).clamp(1e-7, 1).mul(
-            (1 - probabilities).clamp(1e-7, 1).log()
-        )
-    ).sum(dim=-1)
-    return entropy / math.log(probabilities.shape[-1])
-
-
-def _hard_negative_indices(
-    logits: torch.Tensor,
-    matched_queries: torch.Tensor,
-    limit: int,
-) -> torch.Tensor:
-    probabilities = logits.sigmoid()
-    candidates = torch.ones(
-        logits.shape[0], device=logits.device, dtype=torch.bool
-    )
-    candidates[matched_queries] = False
-    available = candidates.nonzero(as_tuple=False).flatten()
-    if available.numel() == 0:
-        return available
-    k = min(limit, int(available.numel()))
-    scores = _hardness(probabilities[available])
-    return available[scores.topk(k).indices]
+    top_two = probabilities.topk(2, dim=-1).values
+    return 1.0 - (top_two[..., 0] - top_two[..., 1]).abs()
 
 
 def _custom_losses(
@@ -179,20 +149,27 @@ def _custom_losses(
     quality_logits = outputs.get("pred_quality_logits")
     predicted_log_variance = outputs.get("pred_log_variance")
     gate = outputs.get("improve_frequency_gate")
-    if (
-        not isinstance(logits, torch.Tensor)
-        or not isinstance(boxes, torch.Tensor)
-        or not isinstance(decoder_states, torch.Tensor)
-        or not isinstance(quality, torch.Tensor)
-        or not isinstance(quality_logits, torch.Tensor)
-        or not isinstance(predicted_log_variance, torch.Tensor)
-        or not isinstance(gate, torch.Tensor)
-    ):
+    if not isinstance(logits, torch.Tensor) or not isinstance(boxes, torch.Tensor):
         raise RuntimeError("RF-DETR improvement outputs are incomplete.")
-    if logits.shape[:2] != boxes.shape[:2] or logits.shape[:2] != quality.shape:
+    if options.dqcd and not isinstance(decoder_states, torch.Tensor):
+        raise RuntimeError("DQCD requires the decoder states output.")
+    if options.dqcd and not isinstance(gate, torch.Tensor):
+        raise RuntimeError("DQCD requires a valid temperature multiplier.")
+    if options.iqcm and (
+        not isinstance(quality, torch.Tensor)
+        or not isinstance(quality_logits, torch.Tensor)
+    ):
+        raise RuntimeError("IQCM outputs are incomplete.")
+    if (options.scu or options.lue) and not isinstance(
+        predicted_log_variance, torch.Tensor
+    ):
+        raise RuntimeError("SCU/LUE uncertainty output is missing.")
+    if options.iqcm and logits.shape[:2] != quality.shape:
         raise RuntimeError(
             "RF-DETR query dimensions differ between prediction heads.")
 
+    if not any((options.iqcm, options.hifrm, options.scu, options.lue, options.dqcd)):
+        return {}
     matched = _match_indices(criterion, outputs, targets)
     batch_size, query_count, class_count = logits.shape
     device = logits.device
@@ -206,17 +183,34 @@ def _custom_losses(
     all_uncertainties: list[torch.Tensor] = []
     all_areas: list[torch.Tensor] = []
     giou_losses: list[torch.Tensor] = []
-    tversky_losses: list[torch.Tensor] = []
     contrastive_losses: list[torch.Tensor] = []
     normalized_box_count = max(
         1, sum(int(target["boxes"].shape[0]) for target in targets)
     )
     epoch = int(getattr(criterion, "_improve_epoch", 0))
-    lue_ramp = min(1.0, (epoch + 1) / options.lue_warmup_epochs)
+    lue_ramp = min(1.0, epoch / options.lue_warmup_epochs)
     dqcd_ramp = min(
         1.0,
         max(0.0, (epoch - options.dqcd_start_epoch + 1) /
             options.dqcd_warmup_epochs),
+    )
+    normalized_decoder_states = (
+        F.normalize(decoder_states, dim=-1, eps=1e-8)
+        if options.dqcd
+        else None
+    )
+    if options.dqcd and (
+        normalized_decoder_states.ndim != 4
+        or normalized_decoder_states.shape[1:3] != (batch_size, query_count)
+    ):
+        raise RuntimeError(
+            "DQCD expects decoder states shaped [layers, batch, queries, features] "
+            "with batch/query dimensions matching pred_logits."
+        )
+    final_decoder_states = (
+        normalized_decoder_states[-1]
+        if normalized_decoder_states is not None
+        else None
     )
 
     for image_index, (source_indices, target_indices) in enumerate(matched):
@@ -230,7 +224,6 @@ def _custom_losses(
         image_logits = logits[image_index]
         probabilities = image_logits.sigmoid()
 
-        class_targets = torch.zeros_like(image_logits)
         if source_indices.numel():
             matched_labels = target_labels[target_indices]
             if matched_labels.numel() and (
@@ -240,41 +233,20 @@ def _custom_losses(
                 raise RuntimeError(
                     "Dataset class indices must be within the RF-DETR output range."
                 )
-            class_targets[source_indices, target_labels[target_indices]] = 1.0
-
-        negative_indices = _hard_negative_indices(
-            image_logits, source_indices, options.hard_negative_k
-        )
-        selected_queries = torch.cat((source_indices, negative_indices))
-        if selected_queries.numel():
-            selected_probabilities = probabilities[selected_queries]
-            selected_targets = class_targets[selected_queries]
-            true_positive = (selected_probabilities * selected_targets).sum()
-            false_positive = (selected_probabilities *
-                              (1 - selected_targets)).sum()
-            false_negative = ((1 - selected_probabilities)
-                              * selected_targets).sum()
-            tversky = true_positive / (
-                true_positive
-                + options.tversky_alpha * false_positive
-                + options.tversky_beta * false_negative
-                + 1e-7
-            )
-            tversky_losses.append(1 - tversky)
-
-        if target_boxes.numel():
+        if options.iqcm and target_boxes.numel():
             quality_target, _ = _box_iou_and_giou(
                 boxes[image_index, :, None, :], target_boxes[None, :, :]
             )
             quality_target = quality_target.max(dim=1).values
-        else:
+        elif options.iqcm:
             quality_target = torch.zeros(
                 query_count, device=device, dtype=boxes.dtype)
-        top_count = min(options.iqcm_top_m, query_count)
-        top_indices = probabilities.max(dim=-1).values.topk(top_count).indices
-        all_quality_predictions.append(
-            quality_logits[image_index, top_indices])
-        all_quality_targets.append(quality_target[top_indices].detach())
+        if options.iqcm:
+            top_count = min(options.iqcm_top_m, query_count)
+            top_indices = probabilities.max(dim=-1).values.topk(top_count).indices
+            all_quality_predictions.append(
+                quality_logits[image_index, top_indices])
+            all_quality_targets.append(quality_target[top_indices].detach())
 
         if source_indices.numel() == 0:
             continue
@@ -284,41 +256,51 @@ def _custom_losses(
         all_predicted.append(predicted_boxes)
         all_expected.append(expected_boxes)
 
-        _, giou = _box_iou_and_giou(predicted_boxes, expected_boxes)
-        giou_losses.append(
-            (1 - giou).clamp_min(0).pow(options.hifrm_gamma).sum())
+        if options.hifrm:
+            _, giou = _box_iou_and_giou(predicted_boxes, expected_boxes)
+            giou_losses.append(
+                (1 - giou).clamp_min(0).pow(options.hifrm_gamma).sum())
 
-        areas = expected_boxes[:, 2:].prod(dim=-1)
-        all_areas.append(areas)
-        all_uncertainties.append(
-            predicted_log_variance[image_index, source_indices])
+        if options.scu or options.lue:
+            areas = expected_boxes[:, 2:].prod(dim=-1)
+            all_areas.append(areas)
+            all_uncertainties.append(
+                predicted_log_variance[image_index, source_indices])
 
-        if decoder_states.shape[0] > 1:
-            normalized_layers = F.normalize(
-                decoder_states[:, image_index], dim=-1, eps=1e-8
-            )
-            final_states = normalized_layers[-1]
+        if options.dqcd and dqcd_ramp > 0 and decoder_states.shape[0] > 1:
             labels = target_labels[target_indices]
             unmatched = (~matched_mask[image_index]).nonzero(
                 as_tuple=False).flatten()
             for local_index, query_index in enumerate(source_indices.tolist()):
-                positive_vectors = [normalized_layers[:-1, query_index]]
-                same_class = source_indices[labels == labels[local_index]]
-                same_class = same_class[same_class != query_index]
-                if same_class.numel():
-                    positive_vectors.append(final_states[same_class])
-                positive_similarities = torch.cat(positive_vectors, dim=0) @ final_states[
-                    query_index
+                positive_vectors = [
+                    normalized_decoder_states[:-1, image_index, query_index]
                 ]
+                anchor_class = labels[local_index]
+                for positive_image, (positive_sources, positive_targets) in enumerate(matched):
+                    positive_sources = positive_sources.to(device=device, dtype=torch.long)
+                    positive_targets = positive_targets.to(device=device, dtype=torch.long)
+                    positive_labels = targets[positive_image]["labels"].to(
+                        device=device, dtype=torch.long
+                    )[positive_targets]
+                    same_class = positive_sources[positive_labels == anchor_class]
+                    if positive_image == image_index:
+                        same_class = same_class[same_class != query_index]
+                    if same_class.numel():
+                        positive_vectors.append(
+                            final_decoder_states[positive_image, same_class]
+                        )
+                anchor = final_decoder_states[image_index, query_index]
+                positive_similarities = torch.cat(positive_vectors, dim=0) @ anchor
                 if unmatched.numel():
-                    similarities = final_states[unmatched] @ final_states[query_index]
+                    image_final_states = final_decoder_states[image_index]
+                    similarities = image_final_states[unmatched] @ anchor
                     ambiguity = _ambiguity(probabilities[unmatched])
                     negative_rank = similarities + 0.25 * ambiguity
                     selected = negative_rank.topk(
                         min(options.hard_negative_k, int(unmatched.numel()))
                     ).indices
                     negative_similarities = similarities[selected]
-                    temperature = 0.15 * (0.5 + gate[image_index].detach())
+                    temperature = 0.15 * gate[image_index].detach()
                     positive_logits = positive_similarities / temperature
                     negative_logits = negative_similarities / temperature
                     contrastive_losses.append(
@@ -329,79 +311,143 @@ def _custom_losses(
                     )
 
     zeros = boxes.sum() * 0.0
+    losses: dict[str, torch.Tensor] = {}
     if all_predicted:
         predicted = torch.cat(all_predicted)
         expected = torch.cat(all_expected)
-        areas = torch.cat(all_areas)
-        area_threshold = (3.0 * areas.median()).clamp(0.02, 0.15)
-        small_mask = (areas < area_threshold).to(boxes.dtype)
-        log_variance = torch.cat(all_uncertainties)
-        centered = log_variance - log_variance.mean(dim=0, keepdim=True)
-        precision = torch.exp(-centered.clamp(-1.5, 1.1))
-        precision = precision / precision.mean().clamp_min(1e-8)
-        absolute_error = (predicted - expected).abs()
-        weighted_error = (
-            small_mask[:, None] * precision * absolute_error
-            + (1 - small_mask[:, None]) * absolute_error
-        )
-        per_box_l1 = (
-            lue_ramp * weighted_error.mean(dim=-1)
-            + (1 - lue_ramp) * absolute_error.mean(dim=-1)
-        )
-        losses = {
-            "loss_bbox": per_box_l1.sum() / normalized_box_count,
-            "loss_giou": torch.stack(giou_losses).sum() / normalized_box_count,
-        }
-        calibration_target = -1.5 * torch.exp(
-            -torch.linalg.vector_norm(
-                predicted[:, :2] - expected[:, :2], dim=-1
-            )
-            / (expected[:, 2:].amax(dim=-1).clamp_min(1e-8) / 2)
-        ) - 4.2
-        scu_values = F.mse_loss(
-            log_variance.mean(dim=-1), calibration_target.detach(), reduction="none"
-        )
-        loss_scu = (scu_values * small_mask).sum() / normalized_box_count
-        error_target = (
-            absolute_error.detach().clamp_min(1e-8).log().clamp(-7.0, 0.0)
-        )
-        uncertainty_error = F.smooth_l1_loss(
-            log_variance, error_target, reduction="none", beta=0.5
-        ).mean(dim=-1)
-        loss_lue = (uncertainty_error * small_mask).sum() / \
-            normalized_box_count
-        losses["loss_scu"] = loss_scu * lue_ramp
-        losses["loss_lue"] = loss_lue * lue_ramp
-    else:
-        losses = {"loss_bbox": zeros, "loss_giou": zeros,
-                  "loss_scu": zeros, "loss_lue": zeros}
+        if options.scu or options.lue:
+            areas = torch.cat(all_areas)
+            area_threshold = (3.0 * areas.median()).clamp(0.02, 0.15)
+            small_mask = (areas < area_threshold).to(boxes.dtype)
+            log_variance = torch.cat(all_uncertainties)
+            absolute_error = (predicted - expected).abs()
 
-    iqcm = (
-        F.binary_cross_entropy_with_logits(
-            torch.cat(all_quality_predictions),
-            torch.cat(all_quality_targets).to(dtype=quality_logits.dtype),
+            if options.lue:
+                centered = log_variance - log_variance.mean(dim=0, keepdim=True)
+                precision = torch.exp(-centered.clamp(-1.5, 1.1))
+                precision = precision / precision.mean().clamp_min(1e-8)
+                weighted_error = (
+                    small_mask[:, None] * precision * absolute_error
+                    + (1 - small_mask[:, None]) * absolute_error
+                )
+                per_box_l1 = (
+                    lue_ramp * weighted_error.sum(dim=-1)
+                    + (1 - lue_ramp) * absolute_error.sum(dim=-1)
+                )
+                losses["loss_bbox"] = per_box_l1.sum() / normalized_box_count
+
+            if options.scu:
+                salience = torch.exp(
+                    -torch.linalg.vector_norm(
+                        predicted[:, :2] - expected[:, :2], dim=-1
+                    )
+                    / (expected[:, 2:].amax(dim=-1).clamp_min(1e-8) / 2)
+                )
+                calibration_target = -1.5 * salience - 4.2
+                scu_values = F.mse_loss(
+                    log_variance.mean(dim=-1),
+                    calibration_target.detach(),
+                    reduction="none",
+                )
+                losses["loss_scu"] = scu_values.sum() * lue_ramp / normalized_box_count
+
+            if options.lue:
+                error_target = (
+                    absolute_error.detach().clamp_min(1e-8).log().clamp(-7.0, 0.0)
+                )
+                uncertainty_error = F.smooth_l1_loss(
+                    log_variance, error_target, reduction="none", beta=0.5
+                ).sum(dim=-1)
+                losses["loss_lue"] = (
+                    uncertainty_error.sum() * lue_ramp / normalized_box_count
+                )
+
+        if options.hifrm:
+            losses["loss_giou"] = (
+                torch.stack(giou_losses).sum() / normalized_box_count
+                if giou_losses
+                else zeros
+            )
+            aux_outputs = outputs.get("aux_outputs")
+            if not isinstance(aux_outputs, (list, tuple)):
+                raise RuntimeError(
+                    "HIFRM requires RF-DETR aux_outputs for hierarchical "
+                    "regression, but this model did not return them."
+                )
+            for layer_index, aux_output in enumerate(aux_outputs):
+                aux_matches = _match_indices(criterion, aux_output, targets)
+                layer_terms: list[torch.Tensor] = []
+                for image_index, (src, tgt) in enumerate(aux_matches):
+                    src = src.to(device=device, dtype=torch.long)
+                    tgt = tgt.to(device=device, dtype=torch.long)
+                    if src.numel() == 0:
+                        continue
+                    target_boxes = targets[image_index]["boxes"].to(
+                        device=device, dtype=aux_output["pred_boxes"].dtype
+                    )
+                    _, layer_giou = _box_iou_and_giou(
+                        aux_output["pred_boxes"][image_index, src],
+                        target_boxes[tgt],
+                    )
+                    layer_terms.append(
+                        (1.0 - layer_giou).clamp_min(0).pow(
+                            options.hifrm_gamma
+                        ).sum()
+                    )
+                losses[f"loss_giou_{layer_index}"] = (
+                    torch.stack(layer_terms).sum() / normalized_box_count
+                    if layer_terms
+                    else zeros
+                )
+    else:
+        if options.scu:
+            losses["loss_scu"] = zeros
+        if options.lue:
+            losses["loss_lue"] = zeros
+        if options.hifrm:
+            losses["loss_giou"] = zeros
+            aux_outputs = outputs.get("aux_outputs", ())
+            if not isinstance(aux_outputs, (list, tuple)):
+                raise RuntimeError(
+                    "HIFRM requires RF-DETR aux_outputs for hierarchical "
+                    "regression, but this model did not return them."
+                )
+            for layer_index, _ in enumerate(aux_outputs):
+                losses[f"loss_giou_{layer_index}"] = zeros
+
+    if options.iqcm:
+        losses["loss_iqcm"] = (
+            F.binary_cross_entropy_with_logits(
+                torch.cat(all_quality_predictions),
+                torch.cat(all_quality_targets).to(dtype=quality_logits.dtype),
+            )
+            if all_quality_predictions
+            else zeros
         )
-        if all_quality_predictions
-        else zeros
-    )
-    losses["loss_iqcm"] = iqcm
-    losses["loss_tversky"] = torch.stack(
-        tversky_losses).mean() if tversky_losses else zeros
-    losses["loss_dqcd"] = (
-        torch.stack(contrastive_losses).mean() * dqcd_ramp
-        if contrastive_losses
-        else zeros
-    )
+    if options.dqcd:
+        losses["loss_dqcd"] = (
+            torch.stack(contrastive_losses).mean() * dqcd_ramp
+            if contrastive_losses
+            else zeros
+        )
     return losses
 
 
-def _attach_model_improvements(model: nn.Module) -> None:
+def _attach_model_improvements(
+    model: nn.Module, options: ImprovementConfig
+) -> None:
     transformer = getattr(model, "transformer", None)
     num_queries = getattr(model, "num_queries", None)
+    group_detr = getattr(model, "group_detr", None)
     hidden_dim = getattr(transformer, "d_model", None)
-    if not isinstance(num_queries, int) or not isinstance(hidden_dim, int):
+    if (
+        not isinstance(num_queries, int)
+        or not isinstance(group_detr, int)
+        or not isinstance(hidden_dim, int)
+    ):
         raise RuntimeError(
-            "RF-DETR compatibility error: model must expose integer num_queries and transformer.d_model."
+            "RF-DETR compatibility error: model must expose integer "
+            "num_queries, group_detr, and transformer.d_model."
         )
     try:
         transformer_signature = inspect.signature(transformer.forward)
@@ -409,13 +455,42 @@ def _attach_model_improvements(model: nn.Module) -> None:
         raise RuntimeError(
             "RF-DETR compatibility error: could not inspect transformer.forward."
         ) from exc
-    query_feat_weight_supported = "query_feat_weight" in transformer_signature.parameters
+    query_feature_supported = "query_feat" in transformer_signature.parameters
+    if options.qar and not query_feature_supported:
+        raise RuntimeError(
+            "RF-DETR compatibility error: QAR requires the decoder input "
+            "query_feat argument; post-decoder scaling is not an "
+            "equivalent implementation."
+        )
 
-    heads = ImprovementHeads(hidden_dim)
-    model.add_module("improvement_heads", heads)
-    transformer.register_parameter(
-        "improvement_query_scale", nn.Parameter(torch.ones(num_queries))
+    heads = ImprovementHeads(
+        hidden_dim,
+        iqcm=options.iqcm,
+        uncertainty=options.scu or options.lue,
     )
+    model.add_module("improvement_heads", heads)
+    if options.qar:
+        scale_min = options.qar_scale_min
+        scale_max = options.qar_scale_max
+        scale_init = options.qar_scale_init
+        normalized_init = (scale_init - scale_min) / (scale_max - scale_min)
+        normalized_init = min(1.0 - 1e-4, max(1e-4, normalized_init))
+        initial_logit = math.log(normalized_init / (1.0 - normalized_init))
+        transformer.register_parameter(
+            "improvement_query_scale_logits",
+            nn.Parameter(torch.full((num_queries,), initial_logit)),
+        )
+
+    def bounded_query_scales(module: nn.Module) -> torch.Tensor:
+        if not options.qar:
+            raise RuntimeError("QAR is disabled in the active config.")
+        logits = getattr(module, "improvement_query_scale_logits", None)
+        if not isinstance(logits, torch.Tensor):
+            raise RuntimeError("RF-DETR QAR query-scale logits are unavailable.")
+        scales = scale_min + (scale_max - scale_min) * logits.sigmoid()
+        return torch.nan_to_num(
+            scales, nan=scale_init, posinf=scale_max, neginf=scale_min
+        )
     original_forward = getattr(model.forward, "__func__", model.forward)
 
     def transformer_output_hook(
@@ -432,24 +507,6 @@ def _attach_model_improvements(model: nn.Module) -> None:
             raise RuntimeError(
                 "RF-DETR transformer output must expose decoder states [layers, batch, queries, dim]."
             )
-        if not query_feat_weight_supported:
-            query_count = states.shape[-2]
-            if query_count % num_queries:
-                raise RuntimeError(
-                    f"RF-DETR query count {query_count} is not divisible by base count {num_queries}."
-                )
-            repeats = query_count // num_queries
-            query_scale = getattr(module, "improvement_query_scale", None)
-            if not isinstance(query_scale, torch.Tensor):
-                raise RuntimeError(
-                    "RF-DETR QAR query-scale parameter is unavailable.")
-            scales = query_scale.clamp(0.5, 2.0).repeat(repeats)
-            shape = (1,) * (states.ndim - 2) + (query_count, 1)
-            states = states * scales.reshape(shape)
-            result_items = list(result)
-            result_items[0] = states
-            result = tuple(result_items) if isinstance(
-                result, tuple) else result_items
         module._improve_decoder_states = states
         return result
 
@@ -461,7 +518,7 @@ def _attach_model_improvements(model: nn.Module) -> None:
         kwargs: dict[str, Any],
     ) -> tuple[tuple[Any, ...], dict[str, Any]]:
         argument_names = tuple(transformer_signature.parameters)
-        query_name = "query_feat_weight"
+        query_name = "query_feat"
         if query_name in kwargs:
             query = kwargs[query_name]
             location = "kwargs"
@@ -472,19 +529,17 @@ def _attach_model_improvements(model: nn.Module) -> None:
             location = "args"
         if not isinstance(query, torch.Tensor) or query.shape[-1] != hidden_dim:
             raise RuntimeError(
-                "RF-DETR compatibility error: query_feat_weight is not a compatible tensor."
+                "RF-DETR compatibility error: query_feat is not a compatible tensor."
             )
         query_count = query.shape[-2]
-        if query_count % num_queries:
+        if query_count not in (num_queries, num_queries * group_detr):
             raise RuntimeError(
-                f"RF-DETR query count {query_count} is not divisible by base count {num_queries}."
+                "RF-DETR QAR expects either the base query set "
+                f"({num_queries}) or grouped queries "
+                f"({num_queries * group_detr}); got {query_count}."
             )
         repeats = query_count // num_queries
-        query_scale = getattr(module, "improvement_query_scale", None)
-        if not isinstance(query_scale, torch.Tensor):
-            raise RuntimeError(
-                "RF-DETR QAR query-scale parameter is unavailable.")
-        scales = query_scale.clamp(0.5, 2.0).repeat(repeats)
+        scales = bounded_query_scales(module).repeat(repeats)
         shape = (1,) * (query.ndim - 2) + (query_count, 1)
         scaled_query = query * scales.reshape(shape)
         if location == "kwargs":
@@ -495,14 +550,14 @@ def _attach_model_improvements(model: nn.Module) -> None:
             args = tuple(mutable_args)
         return args, kwargs
 
-    if query_feat_weight_supported:
+    if options.qar:
         transformer.register_forward_pre_hook(
             query_scale_pre_hook, with_kwargs=True)
 
     def improved_forward(
         _model: nn.Module, samples: Any, *args: Any, **kwargs: Any
     ) -> dict[str, Any]:
-        frequency_gate = _frequency_gate(samples)
+        frequency_gate = _frequency_gate(samples) if options.dqcd else None
         result = original_forward(_model, samples, *args, **kwargs)
         states = getattr(_model.transformer, "_improve_decoder_states", None)
         _model.transformer._improve_decoder_states = None
@@ -515,14 +570,17 @@ def _attach_model_improvements(model: nn.Module) -> None:
                 "RF-DETR decoder query count does not match prediction query count."
             )
         heads = _model.improvement_heads
-        quality_logits = heads.quality_head(last_layer).squeeze(-1)
-        quality = quality_logits.sigmoid().clamp(1e-6, 1 - 1e-6)
-        result["pred_quality"] = quality
-        result["pred_quality_logits"] = quality_logits
-        result["pred_log_variance"] = heads.uncertainty_head(last_layer)
-        result["improve_decoder_states"] = states
-        result["improve_frequency_gate"] = frequency_gate
-        if not _model.training:
+        if options.iqcm:
+            quality_logits = heads.quality_head(last_layer).squeeze(-1)
+            quality = quality_logits.sigmoid().clamp(1e-6, 1 - 1e-6)
+            result["pred_quality"] = quality
+            result["pred_quality_logits"] = quality_logits
+        if options.scu or options.lue:
+            result["pred_log_variance"] = heads.uncertainty_head(last_layer)
+        if options.dqcd:
+            result["improve_decoder_states"] = states
+            result["improve_frequency_gate"] = frequency_gate
+        if not _model.training and options.iqcm:
             calibrated = result["pred_logits"].sigmoid() * \
                 quality.unsqueeze(-1)
             result["pred_logits"] = torch.logit(
@@ -564,7 +622,7 @@ def _attach_builder_hooks(
 
     def model_builder(model_config: Any, train_config: Any) -> nn.Module:
         built_model = original_builder(model_config, train_config)
-        _attach_model_improvements(built_model)
+        _attach_model_improvements(built_model, state["options"])
         return built_model
 
     def criterion_builder(model_config: Any, train_config: Any) -> tuple[Any, Any]:
@@ -599,6 +657,7 @@ def _attach_builder_hooks(
                 base_losses,
                 extra_losses,
                 weight_dict=self.weight_dict,
+                replace_aux_giou=active_options.hifrm,
             )
 
         criterion.forward = MethodType(improved_criterion_forward, criterion)
@@ -625,12 +684,13 @@ def _merge_loss_dicts(
     extra_losses: dict[str, torch.Tensor],
     *,
     weight_dict: dict[str, float],
+    replace_aux_giou: bool = False,
 ) -> dict[str, torch.Tensor]:
     """Validate the RF-DETR loss contract before combining stock and custom losses.
 
-    The custom LUE/HIFRM implementations intentionally replace only the final-layer
-    ``loss_bbox`` and ``loss_giou`` values. Stock auxiliary losses such as
-    ``loss_bbox_0`` and ``loss_giou_0`` remain untouched in ``base_losses``.
+    LUE replaces the final-layer ``loss_bbox``. HIFRM replaces final and
+    auxiliary GIoU losses only when explicitly enabled. All other stock losses
+    remain untouched.
     RF-DETR silently ignores loss values without a matching ``weight_dict`` entry,
     so fail early instead of training with a partially inactive objective.
     """
@@ -672,6 +732,8 @@ def _merge_loss_dicts(
     merged = dict(base_losses)
     merged.update(extra_losses)
     for key, value in auxiliary_before.items():
+        if replace_aux_giou and key.startswith("loss_giou_"):
+            continue
         if merged.get(key) is not value:
             raise RuntimeError(
                 f"RF-DETR auxiliary loss {key!r} was unexpectedly overwritten."
@@ -681,14 +743,41 @@ def _merge_loss_dicts(
 
 def _improvement_config(raw: dict[str, Any]) -> tuple[ImprovementConfig, dict[str, float]]:
     improvement_raw = raw.get("improvements", {})
+    if not isinstance(improvement_raw, dict):
+        raise ValueError("improvements must be a YAML mapping.")
+    boolean_keys = (
+        "qar", "dqcd", "iqcm", "hifrm", "scu", "lue",
+        "weighted_tversky", "hard_negative_mining",
+    )
+    for key in boolean_keys:
+        if key not in improvement_raw or not isinstance(improvement_raw[key], bool):
+            raise ValueError(f"improvements.{key} must be explicitly true or false.")
+    if improvement_raw["weighted_tversky"]:
+        raise ValueError(
+            "Weighted Tversky cannot be enabled until a source equation for "
+            "RF-DETR query classification is supplied and implemented."
+        )
+    if improvement_raw["hard_negative_mining"]:
+        raise ValueError(
+            "MIDOG hard-negative mining requires a verified hard-negative "
+            "image/crop dataset, which is not configured for this food dataset."
+        )
     options = ImprovementConfig(
+        qar=improvement_raw["qar"],
+        dqcd=improvement_raw["dqcd"],
+        iqcm=improvement_raw["iqcm"],
+        hifrm=improvement_raw["hifrm"],
+        scu=improvement_raw["scu"],
+        lue=improvement_raw["lue"],
+        weighted_tversky=improvement_raw["weighted_tversky"],
+        hard_negative_mining=improvement_raw["hard_negative_mining"],
+        qar_scale_min=float(improvement_raw.get("qar_scale_min", 0.5)),
+        qar_scale_max=float(improvement_raw.get("qar_scale_max", 2.0)),
+        qar_scale_init=float(improvement_raw.get("qar_scale_init", 1.0)),
         dqcd_weight=float(improvement_raw.get("dqcd_weight", 0.08)),
         iqcm_weight=float(improvement_raw.get("iqcm_weight", 0.25)),
         scu_weight=float(improvement_raw.get("scu_weight", 0.1)),
         lue_weight=float(improvement_raw.get("lue_weight", 0.25)),
-        tversky_weight=float(improvement_raw.get("tversky_weight", 0.2)),
-        tversky_alpha=float(improvement_raw.get("tversky_alpha", 0.7)),
-        tversky_beta=float(improvement_raw.get("tversky_beta", 0.3)),
         hifrm_gamma=float(improvement_raw.get("hifrm_gamma", 2.0)),
         hard_negative_k=int(improvement_raw.get("hard_negative_k", 128)),
         iqcm_top_m=int(improvement_raw.get("iqcm_top_m", 100)),
@@ -697,7 +786,12 @@ def _improvement_config(raw: dict[str, Any]) -> tuple[ImprovementConfig, dict[st
         lue_warmup_epochs=int(improvement_raw.get("lue_warmup_epochs", 15)),
     )
     if (
-        options.hard_negative_k < 1
+        not math.isfinite(options.qar_scale_min)
+        or not math.isfinite(options.qar_scale_max)
+        or not math.isfinite(options.qar_scale_init)
+        or options.qar_scale_min >= options.qar_scale_max
+        or not options.qar_scale_min < options.qar_scale_init < options.qar_scale_max
+        or options.hard_negative_k < 1
         or options.iqcm_top_m < 1
         or options.dqcd_warmup_epochs < 1
         or options.lue_warmup_epochs < 1
@@ -706,8 +800,6 @@ def _improvement_config(raw: dict[str, Any]) -> tuple[ImprovementConfig, dict[st
             not math.isfinite(value) or value <= 0
             for value in (
                 options.hifrm_gamma,
-                options.tversky_alpha,
-                options.tversky_beta,
             )
         )
     ):
@@ -736,11 +828,10 @@ def _improvement_config(raw: dict[str, Any]) -> tuple[ImprovementConfig, dict[st
         ),
         "loss_bbox": float(configured_losses.get("loss_bbox", 5.0)),
         "loss_giou": float(configured_losses.get("loss_giou", 2.0)),
-        "loss_dqcd": options.dqcd_weight,
-        "loss_iqcm": options.iqcm_weight,
-        "loss_scu": options.scu_weight,
-        "loss_lue": options.lue_weight,
-        "loss_tversky": options.tversky_weight,
+        **({"loss_dqcd": options.dqcd_weight} if options.dqcd else {}),
+        **({"loss_iqcm": options.iqcm_weight} if options.iqcm else {}),
+        **({"loss_scu": options.scu_weight} if options.scu else {}),
+        **({"loss_lue": options.lue_weight} if options.lue else {}),
     }
     if any(not math.isfinite(value) or value < 0 for value in weights.values()):
         raise ValueError(
@@ -897,8 +988,9 @@ def _training_kwargs(
         "device": device,
         "seed": int(training.get("seed", 42)),
         "eval_interval": 1,
-        # Save a full resumable checkpoint after every epoch.
-        "checkpoint_interval": 1,
+        # RF-DETR writes full last.ckpt each epoch when interval != 1, plus
+        # an archival checkpoint_<epoch>.ckpt at the configured interval.
+        "checkpoint_interval": int(training.get("checkpoint_interval", 5)),
         "tensorboard": True,
     }
     if resume_checkpoint is not None and resume_checkpoint.is_file():
@@ -909,6 +1001,7 @@ def _training_kwargs(
 
 def _sync_checkpoint(output_dir: Path) -> None:
     candidates = (
+        "checkpoint_best_total.pth",
         "checkpoint_best_ema.pth",
         "checkpoint_best_regular.pth",
         "checkpoint_best.pth",
@@ -919,9 +1012,23 @@ def _sync_checkpoint(output_dir: Path) -> None:
         if source.is_file() and source.name != "best.pth":
             shutil.copy2(source, output_dir / "best.pth")
             break
-    current = output_dir / "checkpoint.pth"
-    if current.is_file():
-        shutil.copy2(current, output_dir / "last.pth")
+
+
+def _latest_full_checkpoint(output_dir: Path) -> Path | None:
+    """Return the newest RF-DETR/Lightning checkpoint with optimizer state."""
+    latest = output_dir / "last.ckpt"
+    if latest.is_file():
+        return latest
+    archived: list[tuple[int, Path]] = []
+    for path in output_dir.glob("checkpoint_*.ckpt"):
+        try:
+            epoch = int(path.stem.removeprefix("checkpoint_"))
+        except ValueError:
+            continue
+        archived.append((epoch, path))
+    if not archived:
+        return None
+    return max(archived, key=lambda entry: (entry[0], entry[1].stat().st_mtime_ns))[1]
 
 
 def _export_tensorboard_logs(
@@ -959,7 +1066,6 @@ def _export_tensorboard_logs(
             "IQCM": round(values.get("train/loss_iqcm", 0.0), 5),
             "SCU": round(values.get("train/loss_scu", 0.0), 5),
             "LUE": round(values.get("train/loss_lue", 0.0), 5),
-            "Tversky": round(values.get("train/loss_tversky", 0.0), 5),
             "Learning rate": f"{values.get('train/lr', 1e-4):.6e}",
             "val_mAP50": round(values.get("val/mAP_50", 0.0), 4),
             "val_mAP50_95": round(
@@ -986,6 +1092,65 @@ def _validate_dataset(dataset_dir: str) -> str:
     return str(path)
 
 
+def _validate_coco_class_mapping(dataset_dir: str) -> None:
+    """Fail closed unless RF-DETR's own COCO label order matches the protocol."""
+    root = Path(dataset_dir)
+    coco_splits = [
+        split
+        for split in ("train", "valid", "test")
+        if (root / split / "_annotations.coco.json").is_file()
+    ]
+    if not coco_splits:
+        data_config = yaml.safe_load((root / "data.yaml").read_text(encoding="utf-8")) or {}
+        configured_names = data_config.get("names")
+        if isinstance(configured_names, dict):
+            names = [str(configured_names[key]).strip().lower()
+                     for key in sorted(configured_names, key=lambda value: int(value))]
+        elif isinstance(configured_names, list):
+            names = [str(name).strip().lower() for name in configured_names]
+        else:
+            names = []
+        if len(names) != 32 or names[0] != "beef" or names[-1] != "tomato":
+            raise ValueError(
+                "YOLO data.yaml must define the required 32 ordered classes "
+                "(index 1 beef through index 32 tomato)."
+            )
+        return
+
+    from rfdetr.datasets.coco import annotated_category_ids, filter_parent_categories
+
+    category_maps: dict[str, dict[int, str]] = {}
+    ordered_names: list[str] | None = None
+    for split in coco_splits:
+        annotation_path = root / split / "_annotations.coco.json"
+        with annotation_path.open("r", encoding="utf-8") as stream:
+            coco = json.load(stream)
+        categories = filter_parent_categories(
+            coco.get("categories", []), annotated_category_ids(coco)
+        )
+        names = [str(category["name"]).strip().lower() for category in categories]
+        category_map = {int(category["id"]): name for category, name in zip(categories, names)}
+        if len(names) != 32 or names[0] != "beef" or names[-1] != "tomato":
+            raise ValueError(
+                f"{split} COCO classes do not match the required 32-class order: "
+                f"count={len(names)}, first={names[0] if names else None!r}, "
+                f"last={names[-1] if names else None!r}. Verify annotation categories "
+                "and RF-DETR's category-id ordering before training."
+            )
+        if split == "train":
+            ordered_names = names
+        elif names != ordered_names:
+            raise ValueError(
+                "Train/valid effective COCO class orders differ; RF-DETR may map "
+                "category IDs to different labels across splits."
+            )
+        category_maps[split] = category_map
+    if category_maps["train"] != category_maps["valid"]:
+        raise ValueError(
+            "Train/valid COCO category IDs map to different class names."
+        )
+
+
 def train_rfdetr(
     dataset_dir: str | None = None,
     data_dir: str | None = None,
@@ -1007,11 +1172,25 @@ def train_rfdetr(
     if training.get("use_balanced_loss", False):
         print(
             "[WARNING] use_balanced_loss is not a supported RF-DETR argument; "
-            "the integrated Tversky loss handles the requested class-balance term."
+            "no alternate class-balanced loss is enabled in this build."
+        )
+    rfo_config = config.get("rfo", {})
+    if not isinstance(rfo_config, dict) or not isinstance(rfo_config.get("enabled"), bool):
+        raise ValueError("rfo.enabled must be explicitly true or false.")
+    if rfo_config["enabled"]:
+        raise ValueError(
+            "RFO search is disabled in this paper-faithful build until the "
+            "paper's Algorithm 2/3 and fitness are verified against the code."
         )
     dataset_dir = _validate_dataset(
         dataset_dir or data_dir or "/vol/datasets/completed-project-5/coco"
     )
+    if (int(training.get("imgsz", 640)) != 640
+            or int(training.get("patience", 10)) != 10
+            or int(training.get("epochs", 80)) != 80):
+        raise ValueError(
+            "The comparison protocol requires imgsz=640, patience=10, epochs=80."
+        )
     checkpoint_dir = Path(
         output_dir or output_config.get(
             "checkpoint_dir", "/vol/checkpoints/rfdetr_improve_v1")
@@ -1027,6 +1206,7 @@ def train_rfdetr(
     seed = int(training.get("seed", 42))
     options, weights = _improvement_config(config)
     _version_checked_install(options, weights)
+    _validate_coco_class_mapping(dataset_dir)
     model_class = _model_class(variant)
 
     original_sigterm = signal.getsignal(signal.SIGTERM)
@@ -1044,17 +1224,22 @@ def train_rfdetr(
     def handle_sigterm(signum: int, _: Any) -> None:
         raise SystemExit(128 + signum)
 
-    # Modal Volumes persist only after commit(). RF-DETR writes checkpoint.pth
+    # Modal Volumes persist only after commit(). RF-DETR writes full last.ckpt
     # during training; commit it once the file size/mtime has stopped changing.
     commit_stop = threading.Event()
 
     def checkpoint_commit_worker() -> None:
-        checkpoint_file = checkpoint_dir / "checkpoint.pth"
+        checkpoint_file: Path | None = None
         last_committed: tuple[int, int] | None = None
         previous: tuple[int, int] | None = None
         stable_observations = 0
         while not commit_stop.wait(20):
             try:
+                checkpoint_file = _latest_full_checkpoint(checkpoint_dir)
+                if checkpoint_file is None:
+                    previous = None
+                    stable_observations = 0
+                    continue
                 stat = checkpoint_file.stat()
                 signature = (stat.st_size, stat.st_mtime_ns)
             except OSError:
@@ -1088,7 +1273,7 @@ def train_rfdetr(
     signal.signal(signal.SIGTERM, handle_sigterm)
     try:
         rfo = dict(config.get("rfo", {}))
-        if bool(rfo.get("enabled", True)):
+        if rfo["enabled"]:
             trial_epochs = int(rfo.get("epochs_per_trial", 3))
             generations = int(rfo.get("generations", 2))
             if trial_epochs < 1 or generations < 1:
@@ -1179,7 +1364,7 @@ def train_rfdetr(
                 "lr": float(training.get("lr", 1e-4)),
                 "weight_decay": float(training.get("weight_decay", 1e-4)),
                 "num_queries": int(model_config.get("num_queries", 300)),
-                "batch_size": int(training.get("batch_size", 4)),
+                "batch_size": int(training.get("batch_size", 16)),
             }
 
         final_model = _make_model(
@@ -1193,13 +1378,13 @@ def train_rfdetr(
             f"batch={best_candidate['batch_size']}, lr={best_candidate['lr']:.3g}."
         )
         resume_enabled = bool(training.get("resume", True))
-        resume_checkpoint = checkpoint_dir / "checkpoint.pth"
+        resume_checkpoint = _latest_full_checkpoint(checkpoint_dir)
         if not resume_enabled:
             resume_checkpoint = None
-        elif not resume_checkpoint.is_file():
+        elif resume_checkpoint is None:
             print(
-                "[RESUME] No existing full checkpoint found; starting a new final training run.")
-            resume_checkpoint = None
+                "[RESUME] No full Lightning checkpoint found; starting a new training run."
+            )
 
         final_model.train(
             **_training_kwargs(

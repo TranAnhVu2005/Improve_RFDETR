@@ -14,12 +14,36 @@ training:
   device: 0
   seed: 42
   eval_interval: 1
-  checkpoint_interval: 1
+  checkpoint_interval: 5
   lr_encoder: 0.00015
   resume: true
+improvements:
+  # Enabled paper-derived modules in this food-domain transfer experiment.
+  qar: true
+  dqcd: true # Fixed-temperature DQCD branch; DAFD is not integrated.
+  iqcm: true
+  hifrm: true
+  scu: true
+  lue: true
+  # Not implemented from supplied sources/data; true fails fast.
+  weighted_tversky: false
+  hard_negative_mining: false
+  qar_scale_min: 0.5
+  qar_scale_max: 2.0
+  qar_scale_init: 1.0
+  dqcd_weight: 0.08
+  iqcm_weight: 0.25 # Project hyperparameter; paper leaves top-M/lambda to configuration.
+  scu_weight: 0.1
+  lue_weight: 0.5 # Spectral-DETR uncertainty-loss coefficient.
+  iqcm_top_m: 100
+  hard_negative_k: 128
+  hifrm_gamma: 2.0 # Paper defines gamma but does not prescribe a value.
+  dqcd_start_epoch: 8
+  dqcd_warmup_epochs: 5
+  lue_warmup_epochs: 15
 evaluation:
   eval_conf: 0.01
-  cm_conf: 0.25
+  cm_conf: 0.01
   iou_step: 0.05
   benchmark_warmup: 20
 loss_weights:
@@ -30,3 +54,5 @@ outputs:
   checkpoint_dir: /vol/checkpoints/rfdetr_improve_v1
   log_dir: /vol/logs/rfdetr_improve_v1
   eval_dir: /vol/outputs/rfdetr_eval_improve_v1
+rfo:
+  enabled: false # Current optimizer is not verified against paper Algorithm 2/3.

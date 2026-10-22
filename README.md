@@ -16,7 +16,7 @@ Các ràng buộc chi tiết và xử lý khi thiếu thông tin: [AI_AGENT_CONT
 
 ## Cấu hình và ablation
 
-`config/rfdetr_baseline.yaml` là baseline; `config/rfdetr_improve_v1.yaml` là cấu hình improved. Nhánh improved cần có cờ boolean riêng mặc định `true` cho:
+`config/rfdetr_baseline.yaml` là baseline; `config/rfdetr_improve_v1.yaml` là cấu hình improved. Các kỹ thuật đã tích hợp và bật mặc định:
 
 - `qar`
 - `dqcd`
@@ -24,11 +24,18 @@ Các ràng buộc chi tiết và xử lý khi thiếu thông tin: [AI_AGENT_CONT
 - `hifrm`
 - `scu`
 - `lue`
-- `weighted_tversky`
-- `hard_negative_mining`
-- `rfo.enabled` (tìm kiếm siêu tham số)
+- `weighted_tversky`, `hard_negative_mining` và `rfo.enabled` mặc định `false`. Chúng chưa đủ căn cứ để triển khai trung thực cho bài toán/dataset này; nếu bật, code dừng với thông báo thay vì giả lập kỹ thuật.
 
-Mỗi ablation tắt đúng cờ cần kiểm tra, giữ các cờ khác và protocol cố định. Hyperparameters/weights/bounds phải khai báo ở config; không dựa vào hidden Python defaults. Kiểm tra code thực tế trước khi coi các cờ đã được tích hợp.
+Mỗi ablation tắt đúng cờ cần kiểm tra, giữ các cờ khác và protocol cố định. DQCD dùng nhánh nhiệt độ cố định của paper khi không có DAFD; vì vậy đây là adaptation và không gồm nhánh lọc DAFD. HIFRM gamma và IQCM top-M/weight là giá trị cấu hình đề tài vì bài báo không quy định số cụ thể. Paper được nghiên cứu trên miền khác nên chưa có bằng chứng tăng độ chính xác trên nguyên liệu nấu ăn.
+
+### Kỹ thuật được triển khai
+
+- **QAR**: hệ số query học được, giới hạn [0.5, 2], khởi tạo 1.
+- **DQCD**: InfoNCE trên query với positive liên tầng/cùng lớp và hard-negative query theo ambiguity; nhiệt độ fallback `τ=0.15`, không dùng FFT ảnh thay cho DAFD. `hard_negative_mining` là kỹ thuật mining crop MIDOG riêng, hiện tắt.
+- **IQCM**: nhánh dự đoán IoU quality, BCE và hiệu chỉnh score inference.
+- **HIFRM**: focal loss trên `1−GIoU` ở decoder cuối và các decoder phụ.
+- **SCU + LUE**: uncertainty head, hiệu chuẩn uncertainty và precision-weighted L1 theo kích thước hộp; có cờ riêng.
+- **Bỏ qua**: Weighted Tversky không có công thức phù hợp query classification trong PDF; MIDOG hard-negative mining cần dữ liệu crop mô học không có trong bộ nguyên liệu; RFO chưa xác minh đủ thuật toán/fitness.
 
 ## Tài liệu tham khảo
 
@@ -45,7 +52,9 @@ modal run .\train_model\modal_train.py --mode improve
 
 Modal hiện khai báo A100 cho cả hai mode. Kiểm tra config/path thực tế trước khi chạy. Các lệnh trên khởi chạy job GPU có thể tính phí. Không chạy job dài trong công việc audit/tài liệu.
 
-Config mặc định (nếu đúng với revision đang dùng): `config/rfdetr_baseline.yaml`, `config/rfdetr_improve_v1.yaml`. Có thể truyền `--dataset-dir` và `--config-path`; kiểm tra `modal_train.py` để biết cú pháp hiện hành.
+Config mặc định: `config/rfdetr_baseline.yaml`, `config/rfdetr_improve_v1.yaml`. Trước khi tính phí, xác minh Modal account/Volume/secret, dataset split và mapping đủ 32 class theo thứ tự bắt đầu `beef`, kết thúc `tomato`. Có thể truyền `--dataset-dir` và `--config-path`; kiểm tra `modal_train.py` để biết cú pháp hiện hành.
+
+Improved dùng `resume: true`: RF-DETR ghi full `last.ckpt` mỗi epoch; trainer commit checkpoint ổn định lên Modal Volume và lần chạy lại ưu tiên khôi phục `last.ckpt` (có optimizer/scheduler state), rồi mới tìm checkpoint lưu theo epoch. Có thể mất phần epoch chưa commit nếu container bị kill đột ngột. Sau khi run hoàn tất, không chạy lại cùng output path nếu muốn bắt đầu một thí nghiệm mới; dùng output path riêng hoặc tắt resume.
 
 ## Checkpoint và đánh giá
 
