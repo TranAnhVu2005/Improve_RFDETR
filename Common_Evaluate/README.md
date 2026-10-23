@@ -10,9 +10,13 @@ Protocol đang khóa trong `models_config.json`: 32 lớp đã cấu hình, ản
 
 Lưu ý: code `Common_Evaluate` hiện xuất metric COCO và per-class CSV, nhưng không có bước xuất confusion matrix. Nếu cần ma trận nhầm lẫn theo protocol nghiên cứu (confidence 0.01 / IoU sweep 0.05), hãy dùng script đánh giá riêng của nhóm; không coi báo cáo Common_Evaluate là đã có confusion matrix.
 
-## Checkpoint RF-DETR hiện tại
+## Checkpoint RF-DETR QAR-only đang được cấu hình
 
-Ảnh Modal do người dùng cung cấp cho thấy Volume `rfdetr-storage`, thư mục `checkpoints/rfdetr_improve_v1`, file `best.pth`. Cấu hình trỏ tới `/vol/checkpoints/rfdetr_improve_v1/best.pth`; `common_evaluate.py` mount volume đó tại `/vol`. Tên và đường dẫn này dựa theo ảnh; evaluator sẽ tự xác minh file tồn tại trên Modal trước inference.
+Ảnh Modal do người dùng cung cấp cho thấy Volume `rfdetr-storage`, thư mục `checkpoints/rfdetr_improve_v1_qar_only`, file `best.pth`. Cấu hình trỏ tới `/vol/checkpoints/rfdetr_improve_v1_qar_only/best.pth`; `common_evaluate.py` mount volume đó tại `/vol`. Tên và đường dẫn này dựa theo ảnh; evaluator sẽ tự xác minh file tồn tại trên Modal trước inference.
+
+Đây là checkpoint train chỉ bật QAR. Cấu hình riêng `models_config_qar_only.json` bật `use_qar` và đặt scale bounds `0.5`–`2.0` theo cấu hình train; cấu hình benchmark dùng chung `models_config.json` vẫn giữ nguyên checkpoint trước đó. Adapter lấy các logits QAR đã học từ checkpoint rồi áp dụng scale lên `query_feat` trước transformer decoder; hỗ trợ cả query cơ sở và query nhân theo `group_detr`, theo logic của code train. Nếu checkpoint thiếu tensor QAR hoặc số query không khớp, evaluator dừng với lỗi rõ ràng thay vì âm thầm chấm như model không QAR. Cờ `use_rfdetr_123` tắt trong cấu hình QAR-only vì nhánh đó là thay đổi kiến trúc/ranking riêng, không có trong lần train này.
+
+RF-DETR nạp checkpoint trước khi adapter đăng ký tham số QAR riêng, nên log thư viện có thể báo `transformer.improvement_query_scale_logits` là khóa chưa được tiêu thụ. Với profile này, adapter đọc tensor đó từ checkpoint, đăng ký vào transformer và in `[+] Restored QAR ...`; chỉ tiếp tục khi bước khôi phục này thành công.
 
 Dataset được cấu hình ở `/vol/datasets/completed-project-5/coco`, cùng vị trí volume với entrypoint train. Kết quả cloud được ghi dưới `/vol/runs/Common_COCO_Evaluation_Results/<run-id>` và tải về `Common_Evaluate/Results/` ở máy chạy lệnh.
 Evaluator pin `rfdetr==1.11.2`, trùng phiên bản được pin trong Modal image của trainer improved. RF-DETR 1.11.2 cần Transformers 5.1 trở lên; evaluator ghim `torch==2.6.0` / `torchvision==0.21.0` để Transformers không tắt PyTorch vì phiên bản quá cũ. Cặp phiên bản Torch/Torchvision khớp bảng tương thích chính thức của PyTorch.
@@ -26,10 +30,10 @@ Log ngày 22/10/2026 đã dừng ở `import rfdetr` với `ImportError: cannot 
 Tại thư mục gốc repo, dùng PowerShell:
 
 ```powershell
-modal run .\Common_Evaluate\common_evaluate.py::evaluate_single --model-name RFDETR_Medium
+modal run .\Common_Evaluate\common_evaluate.py::evaluate_single --model-name RFDETR_Medium --config-path .\Common_Evaluate\models_config_qar_only.json
 ```
 
-Lệnh chỉ đánh giá `RFDETR_Medium`; không chạy các model khác đang tắt/bật trong file config. Cần đăng nhập Modal trên máy chạy lệnh và truy cập được volume `rfdetr-storage`. Lần đầu Modal có thể build image và tải dependencies. A100 được cấp phát cho evaluator và có thể phát sinh phí.
+Lệnh chỉ đánh giá `RFDETR_Medium` với checkpoint QAR-only; không chạy các model khác đang tắt/bật trong file config. Các lệnh thường dùng vẫn đọc `models_config.json`, còn `--config-path` chọn profile riêng cho lần QAR này. Cần đăng nhập Modal trên máy chạy lệnh và truy cập được volume `rfdetr-storage`. Lần đầu Modal có thể build image và tải dependencies. A100 được cấp phát cho evaluator và có thể phát sinh phí. Lệnh chạy ở foreground; chờ đến khi hoàn tất để kết quả được tải về `Common_Evaluate/Results/`.
 
 Nếu dùng Roboflow để tải dataset khi đường dẫn cloud chưa có dữ liệu, cung cấp `ROBOFLOW_API_KEY` qua môi trường hoặc file `Common_Evaluate/.env` (tạo từ `.env.example`). Không ghi API key vào JSON hay commit `.env`.
 
@@ -54,7 +58,8 @@ Trước khi báo cáo, xác nhận process hoàn tất, `result_RFDETR_Medium.j
 
 ## Cấu hình liên quan
 
-- `models_config.json`: volume, đường dẫn dataset/output, protocol, class list, model/checkpoint và cờ `enabled`.
+- `models_config.json`: cấu hình benchmark dùng chung.
+- `models_config_qar_only.json`: profile riêng cho checkpoint QAR-only; chỉ chọn bằng `--config-path` khi cần đánh giá checkpoint này.
 - `training_config.json`: snapshot cấu hình train được lưu riêng; evaluator không đọc file này.
 - `.env.example`: tên biến bí mật cần thiết. File `.env` thật không được commit.
 

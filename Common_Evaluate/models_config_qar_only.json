@@ -1,0 +1,208 @@
+{
+  "modal_settings": {
+    "volume_name": "rfdetr-storage",
+    "app_name": "app-common-coco-evaluate",
+    "gpu": "A100",
+    "timeout_seconds": 7200,
+    "cloud_dataset_dir": "/vol/datasets/completed-project-5/coco",
+    "cloud_output_dir": "/vol/runs/Common_COCO_Evaluation_Results"
+  },
+  "roboflow": {
+    "api_key": "",
+    "workspace": "nckhcict2025",
+    "project": "completed-project",
+    "version": 5,
+    "dummy_category_name": "19-8-BoSungAnhChoCacLopBiTh-v3zo"
+  },
+  "benchmark_settings": {
+    "protocol_name": "common-coco-v7-640-b1",
+    "imgsz": 640,
+    "expected_num_models": 8,
+    "conf_threshold": 0.0,
+    "operating_conf_threshold": 0.55,
+    "iou_threshold": 0.5,
+    "max_detections": 100,
+    "expected_num_classes": 32,
+    "expected_test_images": 1481,
+    "warmup_runs": 10,
+    "batch_size": 1,
+    "chart_dpi": 300,
+    "local_output_dir": "Results"
+  },
+  "classes": [
+    "beef",
+    "bellpepper",
+    "bittergourd",
+    "bottlegourd",
+    "broccoli",
+    "cabbage",
+    "carrot",
+    "cauliflower",
+    "chayote",
+    "chicken",
+    "chickenegg",
+    "chickenleg",
+    "chickenwin",
+    "corn",
+    "cucumber",
+    "duckegg",
+    "eggplant",
+    "garlic",
+    "ginger",
+    "jicama",
+    "okra",
+    "onion",
+    "pork",
+    "potato",
+    "pumpkin",
+    "radish",
+    "scallion",
+    "shrimp",
+    "spongegourd",
+    "sweetpotato",
+    "tofu",
+    "tomato"
+  ],
+  "ignored_checkpoint_classes": [
+    "19-8-BoSungAnhChoCacLopBiTh-v3zo"
+  ],
+  "models": {
+    "YOLOv26X": {
+      "display_name": "YOLOv26X",
+      "family": "ultralytics",
+      "model_type": "yolo",
+      "imgsz": 640,
+      "weights": "/vol/runs/10_09_2026_YOLO26X_640/best.pt",
+      "local_weights": "Yolov26/10_09_2026/best.pt",
+      "patience": 10,
+      "enabled": false
+    },
+    "FasterRCNN_ResNet50": {
+      "display_name": "Faster R-CNN + ResNet50",
+      "family": "torchvision",
+      "model_type": "fasterrcnn_resnet50_fpn_v2",
+      "label_offset": 1,
+      "imgsz": 640,
+      "constructor_kwargs": {
+        "box_nms_thresh": 0.5
+      },
+      "checkpoint_classes": [
+        "beef",
+        "bellpepper",
+        "bittergourd",
+        "bottlegourd",
+        "broccoli",
+        "cabbage",
+        "carrot",
+        "cauliflower",
+        "chayote",
+        "chicken",
+        "chickenegg",
+        "chickenleg",
+        "chickenwin",
+        "corn",
+        "cucumber",
+        "duckegg",
+        "eggplant",
+        "garlic",
+        "ginger",
+        "jicama",
+        "okra",
+        "onion",
+        "pork",
+        "potato",
+        "pumpkin",
+        "radish",
+        "scallion",
+        "shrimp",
+        "spongegourd",
+        "sweetpotato",
+        "tofu",
+        "tomato"
+      ],
+      "weights": "/vol/runs/10_09_2026_FasterRCNN_ResNet50_640/best.pth",
+      "local_weights": "FasterRCNN/10_09_2026/best.pth",
+      "patience": 10,
+      "enabled": false
+    },
+    "FasterRCNN_MobileNetv3Large": {
+      "display_name": "FasterRCNN_MobileNetv3Large",
+      "family": "torchvision",
+      "model_type": "fasterrcnn_mobilenet_v3_large_fpn",
+      "label_offset": 1,
+      "imgsz": 640,
+      "constructor_kwargs": {
+        "box_nms_thresh": 0.55
+      },
+      "weights": "/models/FasterRCNN_MobileNetv3Large/best_mobilenet_fasterrcnn.pth",
+      "local_weights": "models/FasterRCNN_MobileNetv3Large/best_mobilenet_fasterrcnn.pth",
+      "patience": 15,
+      "enabled": false
+    },
+    "FCOS_ResNet50_FPN": {
+      "display_name": "FCOS + ResNet50-FPN",
+      "family": "torchvision",
+      "model_type": "fcos_resnet50_fpn",
+      "label_offset": 1,
+      "imgsz": 640,
+      "constructor_kwargs": {
+        "nms_thresh": 0.55
+      },
+      "weights": "/models/FCOS_ResNet50_FPN/best_fcos.pth",
+      "local_weights": "models/FCOS_ResNet50_FPN/best_fcos.pth",
+      "patience": null,
+      "enabled": false
+    },
+    "YOLOv11": {
+      "display_name": "YOLOv11",
+      "family": "ultralytics",
+      "model_type": "yolo",
+      "imgsz": 640,
+      "weights": "",
+      "local_weights": "",
+      "patience": null,
+      "enabled": false
+    },
+    "RetinaNet": {
+      "display_name": "RetinaNet",
+      "family": "torchvision",
+      "model_type": "retinanet_resnet50_fpn",
+      "label_offset": 1,
+      "imgsz": 640,
+      "constructor_kwargs": {
+        "nms_thresh": 0.5
+      },
+      "weights": "",
+      "local_weights": "",
+      "patience": null,
+      "enabled": false
+    },
+    "RFDETR_Medium": {
+      "display_name": "RF-DETR Medium",
+      "family": "rfdetr",
+      "model_type": "rfdetr_medium",
+      "model_class": "RFDETRMedium",
+      "use_dinov3": false,
+      "label_offset": 0,
+      "imgsz": 640,
+      "weights": "/vol/checkpoints/rfdetr_improve_v1_qar_only/best.pth",
+      "local_weights": "",
+      "patience": 10,
+      "enabled": true,
+      "use_rfdetr_123": false,
+      "use_qar": true,
+      "qar_scale_min": 0.5,
+      "qar_scale_max": 2.0
+    },
+    "RTDETR_L": {
+      "display_name": "RTDETR-L",
+      "family": "ultralytics",
+      "model_type": "rtdetr",
+      "imgsz": 640,
+      "weights": "/models/RTDETR_L/best.pt",
+      "local_weights": "models/RTDETR_L/best.pt",
+      "patience": 10,
+      "enabled": false
+    }
+  }
+}

@@ -1279,6 +1279,8 @@ class RFDETRAdapter:
             device=device,
             resolution=int(imgsz),
         )
+        if model_cfg.get("use_qar", False):
+            self._attach_qar(weights_path, model_cfg)
         model_context = getattr(self.model, "model", None)
         embedded_classes = getattr(model_context, "class_names", None)
         if embedded_classes is not None and list(embedded_classes) != list(self.checkpoint_classes):
@@ -1304,6 +1306,106 @@ class RFDETRAdapter:
                 f"RF-DETR did not apply the required resolution={imgsz}; "
                 f"effective resolution is {self.imgsz}"
             )
+
+    def _attach_qar(self, weights_path: str, model_cfg: Dict[str, Any]) -> None:
+        """Restore the trained QAR query scales and apply them before RF-DETR decoding."""
+        import inspect
+        import torch
+        from torch import nn
+        from rfdetr.utilities.io import _safe_torch_load
+
+        # RF-DETR's public wrapper contains a ModelContext, which in turn holds
+        # the actual LWDETR nn.Module. QAR hooks and parameters belong on LWDETR.
+        core_model = self.get_torch_module()
+        transformer = getattr(core_model, "transformer", None)
+        if transformer is None:
+            raise RuntimeError("QAR checkpoint requested, but RF-DETR exposes no transformer.")
+
+        checkpoint = _safe_torch_load(weights_path, trust=False)
+        state = checkpoint.get("model")
+        if not isinstance(state, dict) and isinstance(checkpoint.get("state_dict"), dict):
+            state = {
+                key[len("model."):]: value
+                for key, value in checkpoint["state_dict"].items()
+                if key.startswith("model.")
+            }
+        if not isinstance(state, dict):
+            raise ValueError("QAR checkpoint has no supported model state dictionary.")
+        logits = state.get("transformer.improvement_query_scale_logits")
+        if not isinstance(logits, torch.Tensor) or logits.ndim != 1:
+            raise ValueError(
+                "The selected checkpoint does not contain the learned QAR parameter "
+                "transformer.improvement_query_scale_logits; refusing to evaluate it as QAR."
+            )
+
+        num_queries = int(getattr(core_model, "num_queries", 0))
+        group_detr = int(getattr(core_model, "group_detr", 1))
+        if num_queries <= 0 or logits.numel() != num_queries:
+            raise ValueError(
+                f"QAR scale count ({logits.numel()}) does not match RF-DETR num_queries ({num_queries})."
+            )
+        if group_detr <= 0:
+            raise ValueError(f"Invalid RF-DETR group_detr value for QAR: {group_detr}.")
+
+        scale_min = float(model_cfg.get("qar_scale_min", 0.5))
+        scale_max = float(model_cfg.get("qar_scale_max", 2.0))
+        if not scale_min < scale_max:
+            raise ValueError("QAR requires qar_scale_min < qar_scale_max.")
+        transformer.register_parameter(
+            "improvement_query_scale_logits",
+            nn.Parameter(logits.detach().to(dtype=torch.float32).clone(), requires_grad=False),
+        )
+        try:
+            signature = inspect.signature(transformer.forward)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Could not inspect RF-DETR transformer.forward for QAR.") from exc
+        if "query_feat" not in signature.parameters:
+            raise RuntimeError("This RF-DETR version does not expose query_feat required by trained QAR.")
+        query_position = tuple(signature.parameters).index("query_feat")
+        hidden_dim = getattr(transformer, "d_model", None)
+        if not isinstance(hidden_dim, int):
+            raise RuntimeError("RF-DETR transformer does not expose the hidden size required by QAR.")
+
+        def scale_query(module, args, kwargs):
+            if "query_feat" in kwargs:
+                query = kwargs["query_feat"]
+                in_kwargs = True
+            else:
+                query = args[query_position] if query_position < len(args) else None
+                in_kwargs = False
+            if not isinstance(query, torch.Tensor):
+                raise RuntimeError("QAR received a non-tensor query_feat.")
+            if query.shape[-1] != hidden_dim:
+                raise RuntimeError(
+                    f"QAR expected query_feat hidden size {hidden_dim}, got {query.shape[-1]}."
+                )
+            query_count = int(query.shape[-2])
+            if query_count not in (num_queries, num_queries * group_detr):
+                shape = tuple(query.shape)
+                raise RuntimeError(
+                    f"QAR expected {num_queries} base queries or "
+                    f"{num_queries * group_detr} grouped queries, got {shape}."
+                )
+            scales = scale_min + (scale_max - scale_min) * module.improvement_query_scale_logits.sigmoid()
+            scales = scales.repeat(query_count // num_queries)
+            scaled = query * scales.to(device=query.device, dtype=query.dtype).reshape(
+                *((1,) * (query.ndim - 2)), query_count, 1
+            )
+            if in_kwargs:
+                kwargs["query_feat"] = scaled
+            else:
+                mutable_args = list(args)
+                mutable_args[query_position] = scaled
+                args = tuple(mutable_args)
+            return args, kwargs
+
+        transformer.register_forward_pre_hook(scale_query, with_kwargs=True)
+        self.qar_scale_min = scale_min
+        self.qar_scale_max = scale_max
+        print(
+            f"[+] Restored QAR from checkpoint: {num_queries} learned query scales "
+            f"(range [{scale_min}, {scale_max}])."
+        )
 
     def predict_image(self, image_bgr: np.ndarray, orig_w: int, orig_h: int) -> List[Dict[str, Any]]:
         from PIL import Image
@@ -2407,12 +2509,12 @@ def evaluate_my_models():
 
 
 @app.local_entrypoint()
-def evaluate_single(model_name: str):
+def evaluate_single(model_name: str, config_path: str = ""):
     """
     Lệnh CLI đánh giá 1 mô hình cụ thể:
     modal run common_evaluate.py::evaluate_single --model-name YOLOv26X
     """
-    local_cfg = load_config()
+    local_cfg = load_config(config_path or None)
     api_key = get_roboflow_api_key(local_cfg)
     if "roboflow" not in local_cfg:
         local_cfg["roboflow"] = {}
