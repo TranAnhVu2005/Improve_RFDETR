@@ -19,7 +19,7 @@ training:
   resume: true
 improvements:
   # Enabled paper-derived modules in this food-domain transfer experiment.
-  qar: true
+  qar: false
   dqcd: true # Fixed-temperature DQCD branch; DAFD is not integrated.
   iqcm: true
   hifrm: true

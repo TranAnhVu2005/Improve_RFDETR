@@ -27,6 +27,8 @@ Mọi ablation đổi đúng cờ cần nghiên cứu; giữ nguyên protocol, d
 
 Improved config bật `resume: true`. Full Lightning checkpoint `last.ckpt` được lưu mỗi epoch và commit ổn định lên Modal Volume; khi chạy lại, ưu tiên `last.ckpt`, fallback checkpoint lưu theo epoch. Resume khôi phục optimizer/scheduler nếu checkpoint đầy đủ còn tồn tại. Có thể mất epoch đang chạy khi bị kill; thí nghiệm mới cần output directory riêng hoặc `resume: false`.
 
+Khi dùng `train_model/modal_train.py --mode improve`, entrypoint gọi `train_improved.spawn()` và trả FunctionCall ID. Nếu muốn đóng terminal ngay sau khi gửi job, lệnh `modal run` phải có `--detach`; nếu không, ephemeral App có thể dừng khi local entrypoint kết thúc. FunctionCall ID một mình không chứng minh container đang chạy; kiểm tra App logs/dashboard để xác nhận.
+
 Schema đang dùng:
 
 ```yaml
@@ -49,6 +51,7 @@ rfo:
 - Config: `config/rfdetr_baseline.yaml`, `config/rfdetr_improve_v1.yaml`.
 - Trainers: `train_model/train_baseline.py`, `train_model/train_improve_v1.py`.
 - Paper Markdown: `BaiBaoDangMarkDown/`; bản gốc là nguồn tham khảo, giữ nguyên trừ khi được yêu cầu sửa.
+- Đánh giá chung: `Common_Evaluate/`; đọc `Common_Evaluate/README.md` trước mọi lần chạy/chỉnh sửa. Entrypoint Modal là `Common_Evaluate/common_evaluate.py`; cấu hình là `Common_Evaluate/models_config.json`. Script mount Modal Volume `rfdetr-storage` tại `/vol`; checkpoint theo ảnh người dùng cung cấp là `/vol/checkpoints/rfdetr_improve_v1/best.pth`. Lỗi import `BackboneConfigMixin` trước đây do image dùng Torch 2.5.1 khiến Transformers tắt backend PyTorch; image evaluator đã được chỉnh sang Torch 2.6.0/Torchvision 0.21.0 cùng RF-DETR 1.11.2/Transformers 5.1+. Chưa chạy lại Modal để xác nhận.
 - Các file trên được xác nhận tồn tại trong workspace khi context này được viết. Luôn kiểm tra `git status` và đọc file trước khi thay đổi.
 
 ## Tài liệu để tra cứu

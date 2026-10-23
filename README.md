@@ -56,9 +56,21 @@ Config mặc định: `config/rfdetr_baseline.yaml`, `config/rfdetr_improve_v1.y
 
 Improved dùng `resume: true`: RF-DETR ghi full `last.ckpt` mỗi epoch; trainer commit checkpoint ổn định lên Modal Volume và lần chạy lại ưu tiên khôi phục `last.ckpt` (có optimizer/scheduler state), rồi mới tìm checkpoint lưu theo epoch. Có thể mất phần epoch chưa commit nếu container bị kill đột ngột. Sau khi run hoàn tất, không chạy lại cùng output path nếu muốn bắt đầu một thí nghiệm mới; dùng output path riêng hoặc tắt resume.
 
+Config sàng lọc QAR-only nằm ở `config/rfdetr_improve_v1_qar_only.yaml`: chỉ `qar` bật, năm module còn lại tắt; protocol/hyperparameter giữ nguyên, `resume: false`, và checkpoint/log/output có thư mục mới `*_qar_only`. Chạy bằng:
+
+```powershell
+modal run --detach .\train_model\modal_train.py --mode improve --config-path /workspace/config/rfdetr_improve_v1_qar_only.yaml
+```
+
+Lệnh dùng cả Modal background `spawn` và `--detach`: App không bị dừng khi local entrypoint hoàn tất hoặc terminal ngắt kết nối; chờ `FunctionCall ID` rồi có thể đóng terminal. Kết quả được lưu riêng tại `/vol/checkpoints/rfdetr_improve_v1_qar_only` và `/vol/logs/rfdetr_improve_v1_qar_only`, không ghi vào run improved trước. Giữ nguyên split, seed và các hyperparameter còn lại khi so sánh. Không đổi output path rồi bật resume cho run này.
+
 ## Checkpoint và đánh giá
 
-Trước khi bàn giao, ghi đường dẫn best checkpoint, run/config snapshot, split ID, best epoch và tiêu chí chọn checkpoint. Không gộp/ghi đè output baseline, improved và từng ablation. Đánh giá mAP/CM thuộc script riêng của nhóm; tham số phải giữ confidence 0.01, IoU step 0.05 và confusion matrix.
+Trước khi bàn giao, ghi đường dẫn best checkpoint, run/config snapshot, split ID, best epoch và tiêu chí chọn checkpoint. Không gộp/ghi đè output baseline, improved và từng ablation. Có hai luồng đánh giá được ghi nhận trong dự án: script nghiên cứu riêng (confidence 0.01, IoU sweep bước 0.05, confusion matrix) và benchmark COCO của `Common_Evaluate` (protocol cụ thể trong README/config của thư mục đó). Không trộn metric giữa hai luồng; báo rõ luồng đã chạy.
+
+### Đánh giá chung sau khi train
+
+Hướng dẫn vận hành, protocol, đường dẫn Modal và lệnh đánh giá RF-DETR hiện tại nằm trong [Common_Evaluate/README.md](Common_Evaluate/README.md). Hãy đọc tài liệu đó trước khi chạy. Ảnh Modal hiện chỉ xác nhận tên Volume `rfdetr-storage` và file `checkpoints/rfdetr_improve_v1/best.pth`; evaluator xác minh file có thật trước inference. Không ghi metric cho tới khi có output của lần đánh giá thật.
 
 ## Trạng thái và giới hạn
 

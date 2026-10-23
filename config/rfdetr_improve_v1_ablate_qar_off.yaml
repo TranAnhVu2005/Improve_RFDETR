@@ -1,0 +1,57 @@
+model:
+  name: RF-DETR
+  variant: RFDETRMedium
+  pretrained: true
+training:
+  epochs: 80
+  patience: 10
+  imgsz: 640
+  batch_size: 16
+  grad_accum_steps: 1
+  workers: 4
+  lr: 0.0001
+  weight_decay: 0.0001
+  device: 0
+  seed: 42
+  eval_interval: 1
+  checkpoint_interval: 5
+  lr_encoder: 0.00015
+  resume: false
+improvements:
+  # QAR ablation: disable only QAR; preserve all other configured modules.
+  qar: false
+  dqcd: true # Fixed-temperature DQCD branch; DAFD is not integrated.
+  iqcm: true
+  hifrm: true
+  scu: true
+  lue: true
+  weighted_tversky: false
+  hard_negative_mining: false
+  qar_scale_min: 0.5
+  qar_scale_max: 2.0
+  qar_scale_init: 1.0
+  dqcd_weight: 0.08
+  iqcm_weight: 0.25
+  scu_weight: 0.1
+  lue_weight: 0.5
+  iqcm_top_m: 100
+  hard_negative_k: 128
+  hifrm_gamma: 2.0
+  dqcd_start_epoch: 8
+  dqcd_warmup_epochs: 5
+  lue_warmup_epochs: 15
+evaluation:
+  eval_conf: 0.01
+  cm_conf: 0.01
+  iou_step: 0.05
+  benchmark_warmup: 20
+loss_weights:
+  loss_ce: 1.0
+  loss_bbox: 5.0
+  loss_giou: 2.0
+outputs:
+  checkpoint_dir: /vol/checkpoints/rfdetr_improve_v1_ablate_qar_off
+  log_dir: /vol/logs/rfdetr_improve_v1_ablate_qar_off
+  eval_dir: /vol/outputs/rfdetr_eval_improve_v1_ablate_qar_off
+rfo:
+  enabled: false

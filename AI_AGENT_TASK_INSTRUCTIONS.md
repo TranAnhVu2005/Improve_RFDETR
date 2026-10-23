@@ -4,6 +4,8 @@
 
 Đọc `AI_AGENT_CONTEXT.md` trước, rồi chỉ đọc phần code/paper cần cho nhiệm vụ. Người dùng muốn **tài liệu hướng dẫn và context được thiết kế lại** để agent triển khai nhánh RF-DETR cải tiến dạng ablation. Không sửa code/training khi chưa được giao cụ thể. Mọi run cải tiến phải giữ protocol bất biến trong context; toàn bộ thuật toán được điều khiển bằng config boolean.
 
+Nếu yêu cầu liên quan tới thư mục đánh giá chung, bắt đầu bằng `Common_Evaluate/README.md`; file này là hướng dẫn vận hành ngắn và chỉ đường tới config/entrypoint. Không đọc toàn bộ `common_evaluate.py` trừ khi cần xử lý đúng một hàm hoặc lỗi cụ thể. Không sửa `training_config.json` cho thay đổi evaluator vì script không đọc file đó.
+
 ## Nguyên tắc
 
 1. Audit repo, `git status`, config thật, entry point và API trước khi sửa. Giữ nguyên thay đổi có sẵn của người dùng; không revert/ghi đè chúng.
