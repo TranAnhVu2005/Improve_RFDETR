@@ -18,6 +18,10 @@ Lưu ý: code `Common_Evaluate` hiện xuất metric COCO và per-class CSV, nh�
 
 RF-DETR nạp checkpoint trước khi adapter đăng ký tham số QAR riêng, nên log thư viện có thể báo `transformer.improvement_query_scale_logits` là khóa chưa được tiêu thụ. Với profile này, adapter đọc tensor đó từ checkpoint, đăng ký vào transformer và in `[+] Restored QAR ...`; chỉ tiếp tục khi bước khôi phục này thành công.
 
+## Profile đánh giá DQCD-only
+
+Ảnh Modal mới cho thấy checkpoint `/vol/checkpoints/rfdetr_improve_v1_dqcd_only/best.pth` trên Volume `rfdetr-storage`. Cấu hình riêng `models_config_dqcd_only.json` trỏ tới checkpoint đó, tắt `use_qar` và `use_rfdetr_123`. DQCD trong code train chỉ thêm loss tương phản khi huấn luyện; không có nhánh hiệu chỉnh inference riêng cần gắn vào evaluator.
+
 Dataset được cấu hình ở `/vol/datasets/completed-project-5/coco`, cùng vị trí volume với entrypoint train. Kết quả cloud được ghi dưới `/vol/runs/Common_COCO_Evaluation_Results/<run-id>` và tải về `Common_Evaluate/Results/` ở máy chạy lệnh.
 Evaluator pin `rfdetr==1.11.2`, trùng phiên bản được pin trong Modal image của trainer improved. RF-DETR 1.11.2 cần Transformers 5.1 trở lên; evaluator ghim `torch==2.6.0` / `torchvision==0.21.0` để Transformers không tắt PyTorch vì phiên bản quá cũ. Cặp phiên bản Torch/Torchvision khớp bảng tương thích chính thức của PyTorch.
 
@@ -34,6 +38,12 @@ modal run .\Common_Evaluate\common_evaluate.py::evaluate_single --model-name RFD
 ```
 
 Lệnh chỉ đánh giá `RFDETR_Medium` với checkpoint QAR-only; không chạy các model khác đang tắt/bật trong file config. Các lệnh thường dùng vẫn đọc `models_config.json`, còn `--config-path` chọn profile riêng cho lần QAR này. Cần đăng nhập Modal trên máy chạy lệnh và truy cập được volume `rfdetr-storage`. Lần đầu Modal có thể build image và tải dependencies. A100 được cấp phát cho evaluator và có thể phát sinh phí. Lệnh chạy ở foreground; chờ đến khi hoàn tất để kết quả được tải về `Common_Evaluate/Results/`.
+
+Đánh giá checkpoint DQCD-only bằng profile riêng:
+
+```powershell
+modal run .\Common_Evaluate\common_evaluate.py::evaluate_single --model-name RFDETR_Medium --config-path .\Common_Evaluate\models_config_dqcd_only.json
+```
 
 Nếu dùng Roboflow để tải dataset khi đường dẫn cloud chưa có dữ liệu, cung cấp `ROBOFLOW_API_KEY` qua môi trường hoặc file `Common_Evaluate/.env` (tạo từ `.env.example`). Không ghi API key vào JSON hay commit `.env`.
 
@@ -60,6 +70,7 @@ Trước khi báo cáo, xác nhận process hoàn tất, `result_RFDETR_Medium.j
 
 - `models_config.json`: cấu hình benchmark dùng chung.
 - `models_config_qar_only.json`: profile riêng cho checkpoint QAR-only; chỉ chọn bằng `--config-path` khi cần đánh giá checkpoint này.
+- `models_config_dqcd_only.json`: profile riêng cho checkpoint DQCD-only; chỉ chọn bằng `--config-path` khi cần đánh giá checkpoint này.
 - `training_config.json`: snapshot cấu hình train được lưu riêng; evaluator không đọc file này.
 - `.env.example`: tên biến bí mật cần thiết. File `.env` thật không được commit.
 

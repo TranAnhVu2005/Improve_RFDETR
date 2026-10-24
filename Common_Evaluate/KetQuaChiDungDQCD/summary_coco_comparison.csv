@@ -1,0 +1,2 @@
+﻿Mô hình,Precision,Recall,F1,mAP@50,mAP@50-95,mAP@75,AR@100,Patience,GFLOPs,Parameters,Latency,FPS,Trạng thái
+RF-DETR Medium,0.9812,0.9719,0.9765,0.9873,0.8784,0.9557,0.9110,10,39.09,33.60,28.06,35.64,Hoàn tất đánh giá

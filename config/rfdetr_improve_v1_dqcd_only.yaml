@@ -18,13 +18,13 @@ training:
   lr_encoder: 0.00015
   resume: false
 improvements:
-  # QAR ablation: disable only QAR; preserve all other configured modules.
+  # DQCD-only screening run; DAFD is not integrated, so use its fixed-temperature branch.
   qar: false
-  dqcd: true # Fixed-temperature DQCD branch; DAFD is not integrated.
-  iqcm: true
-  hifrm: true
-  scu: true
-  lue: true
+  dqcd: true
+  iqcm: false
+  hifrm: false
+  scu: false
+  lue: false
   weighted_tversky: false
   hard_negative_mining: false
   qar_scale_min: 0.5
@@ -50,8 +50,8 @@ loss_weights:
   loss_bbox: 5.0
   loss_giou: 2.0
 outputs:
-  checkpoint_dir: /vol/checkpoints/rfdetr_improve_v1_ablate_qar_off
-  log_dir: /vol/logs/rfdetr_improve_v1_ablate_qar_off
-  eval_dir: /vol/outputs/rfdetr_eval_improve_v1_ablate_qar_off
+  checkpoint_dir: /vol/checkpoints/rfdetr_improve_v1_dqcd_only
+  log_dir: /vol/logs/rfdetr_improve_v1_dqcd_only
+  eval_dir: /vol/outputs/rfdetr_eval_improve_v1_dqcd_only
 rfo:
   enabled: false

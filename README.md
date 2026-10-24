@@ -64,6 +64,16 @@ modal run --detach .\train_model\modal_train.py --mode improve --config-path /wo
 
 Lệnh dùng cả Modal background `spawn` và `--detach`: App không bị dừng khi local entrypoint hoàn tất hoặc terminal ngắt kết nối; chờ `FunctionCall ID` rồi có thể đóng terminal. Kết quả được lưu riêng tại `/vol/checkpoints/rfdetr_improve_v1_qar_only` và `/vol/logs/rfdetr_improve_v1_qar_only`, không ghi vào run improved trước. Giữ nguyên split, seed và các hyperparameter còn lại khi so sánh. Không đổi output path rồi bật resume cho run này.
 
+### Sàng lọc DQCD-only
+
+`config/rfdetr_improve_v1_dqcd_only.yaml` bật riêng `dqcd`, tắt QAR/IQCM/HIFRM/SCU/LUE và các loss chưa tích hợp, đặt `resume: false`, giữ cùng protocol/hyperparameter và dùng output path riêng. DQCD được train như loss tương phản trên decoder queries; vì DAFD chưa tích hợp, code dùng nhánh nhiệt độ cố định theo ghi chú cấu hình. Đây là run train mới từ pretrained RF-DETR, không resume checkpoint QAR-only.
+
+```powershell
+modal run --detach .\train_model\modal_train.py --mode improve --config-path /workspace/config/rfdetr_improve_v1_dqcd_only.yaml
+```
+
+Theo dõi `FunctionCall ID` trên Modal. Checkpoint và log được ghi riêng dưới `/vol/checkpoints/rfdetr_improve_v1_dqcd_only` và `/vol/logs/rfdetr_improve_v1_dqcd_only`.
+
 ## Checkpoint và đánh giá
 
 Trước khi bàn giao, ghi đường dẫn best checkpoint, run/config snapshot, split ID, best epoch và tiêu chí chọn checkpoint. Không gộp/ghi đè output baseline, improved và từng ablation. Có hai luồng đánh giá được ghi nhận trong dự án: script nghiên cứu riêng (confidence 0.01, IoU sweep bước 0.05, confusion matrix) và benchmark COCO của `Common_Evaluate` (protocol cụ thể trong README/config của thư mục đó). Không trộn metric giữa hai luồng; báo rõ luồng đã chạy.
